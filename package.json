@@ -1,20 +1,17 @@
 {
-  "dependencies": {
-    "discord": "^0.8.2",
-    "discord.js": "^14.24.2",
-    "dotenv": "^17.2.3",
-    "express": "^5.1.0",
-    "node": "^22.21.0",
-    "node-fetch": "^3.3.2"
-  },
-  "name": "new-folder",
+  "name": "nkrbot",
   "version": "1.0.0",
-  "description": "",
+  "description": "AI Discord bot using OpenRouter",
+  "type": "module",
   "main": "nkr.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node nkr.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC"
+  "dependencies": {
+    "discord.js": "^14.15.2",
+    "dotenv": "^17.2.3",
+    "node-fetch": "^3.3.2",
+    "express": "^4.19.2"
+  }
 }
+
