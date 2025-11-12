@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "NKR.bot - AI + Moderation",
   "type": "module",
-  "main": "bot.js",
+  "main": "nkr.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node nkr.js"
   },
   "dependencies": {
     "discord.js": "^14.24.2",
