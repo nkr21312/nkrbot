@@ -1,5 +1,8 @@
 // =====================================================
 // NO DOTENV — Render uses process.env directly
+import dotenv from "dotenv";
+dotenv.config();
+
 // =====================================================
 
 import {
