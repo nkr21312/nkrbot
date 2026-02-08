@@ -1,0 +1,16 @@
+{
+  "name": "nkrbot",
+  "version": "1.0.0",
+  "description": "NKR.bot - AI + Moderation",
+  "type": "module",
+  "main": "nkr.js",
+  "scripts": {
+    "start": "node nkr.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.24.2",
+    "dotenv": "^17.2.3",
+    "node-fetch": "^3.3.2",
+    "express": "^4.19.2"
+  }
+}
