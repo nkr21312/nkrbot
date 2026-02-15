@@ -1,8 +1,8 @@
 // =====================================================
 // NO DOTENV — Render uses process.env directly
-import dotenv from "dotenv";
-dotenv.config();
-
+// import dotenv from "dotenv";
+// dotenv.config();
+// remove dotenv import and config call for Render compatibility
 // =====================================================
 
 import {
