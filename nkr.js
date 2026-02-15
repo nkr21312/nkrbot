@@ -191,7 +191,6 @@ const guildCommands = [
     )
 ].map(c => c.toJSON());
 
-<<<<<<< HEAD
 // === Register slash commands ===
 async function registerSlashCommands() {
   const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
@@ -207,19 +206,6 @@ async function registerSlashCommands() {
   } catch (err) {
     console.error("❌ Command registration failed:", err);
   }
-=======
-// =====================================================
-// REGISTER COMMANDS
-// =====================================================
-async function registerCommands() {
-  const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(Routes.applicationCommands(client.user.id), { body: globalCommands });
-  await rest.put(
-    Routes.applicationGuildCommands(client.user.id, GUILD_ID),
-    { body: guildCommands }
-  );
-  console.log("Commands registered");
->>>>>>> c0dce4f756a226befce6b040c22beb82127f1f00
 }
 
 // =====================================================
@@ -297,7 +283,6 @@ client.on("interactionCreate", async i => {
     await i.reply(`Banned ${u.tag}`);
   }
 
-<<<<<<< HEAD
     // unban
     if (cmd === "unban") {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "You lack Ban Members permission.", ephemeral: true });
@@ -344,26 +329,6 @@ client.on("interactionCreate", async i => {
       await interaction.reply(`⚠️ Warned ${target.tag}: ${reason}`);
       await sendLog(client, `⚠️ ${interaction.user.tag} warned ${target.tag}: ${reason}`);
     }
-=======
-  if (cmd === "mute") {
-    const u = i.options.getUser("target");
-    const m = i.options.getInteger("minutes");
-    const mem = await i.guild.members.fetch(u.id);
-    await mem.timeout(m * 60 * 1000);
-    await i.reply(`Muted ${u.tag}`);
-  }
-
-  if (cmd === "warn") {
-    const u = i.options.getUser("target");
-    const r = i.options.getString("reason") || "No reason";
-    const warns = await loadWarnings();
-    warns[i.guild.id] ??= {};
-    warns[i.guild.id][u.id] ??= [];
-    warns[i.guild.id][u.id].push({ reason: r });
-    await saveWarnings(warns);
-    await i.reply(`Warned ${u.tag}`);
-  }
->>>>>>> c0dce4f756a226befce6b040c22beb82127f1f00
 
   if (cmd === "warnings") {
     const u = i.options.getUser("target") || i.user;
