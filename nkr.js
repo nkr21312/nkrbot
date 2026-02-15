@@ -1,8 +1,5 @@
 // =====================================================
-// NO DOTENV — Render uses process.env directly
-// import dotenv from "dotenv";
-// dotenv.config();
-// remove dotenv import and config call for Render compatibility
+// RENDER READY NKR.BOT
 // =====================================================
 
 import {
@@ -14,20 +11,18 @@ import {
   Routes,
   PermissionFlagsBits
 } from "discord.js";
+
 import fetch from "node-fetch";
 import express from "express";
 import fs from "fs/promises";
 import path from "path";
 
 // =====================================================
-// ENV CHECK (HARD FAIL)
+// ENV CHECK
 // =====================================================
-if (!process.env.DISCORD_BOT_TOKEN) {
-  throw new Error("DISCORD_BOT_TOKEN missing");
-}
-if (!process.env.GUILD_ID) {
-  throw new Error("GUILD_ID missing");
-}
+
+if (!process.env.DISCORD_BOT_TOKEN) throw new Error("DISCORD_BOT_TOKEN missing");
+if (!process.env.GUILD_ID) throw new Error("GUILD_ID missing");
 
 const TOKEN = process.env.DISCORD_BOT_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
@@ -36,51 +31,53 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || null;
 // =====================================================
 // DISCORD CLIENT
 // =====================================================
+
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildMessageReactions
+    GatewayIntentBits.GuildMembers
   ],
   partials: [Partials.Channel]
 });
 
 // =====================================================
-// KEEP-ALIVE SERVER (RENDER)
+// KEEP ALIVE SERVER (RENDER)
 // =====================================================
+
 const app = express();
 app.get("/", (_, res) => res.send("NKR.bot alive"));
 app.listen(process.env.PORT || 3000);
 
 // =====================================================
-// WARNINGS STORAGE
+// WARN STORAGE
 // =====================================================
+
 const WARN_FILE = path.resolve("./warnings.json");
 
 async function loadWarnings() {
-  try {
-    return JSON.parse(await fs.readFile(WARN_FILE, "utf8"));
-  } catch {
-    return {};
-  }
+  try { return JSON.parse(await fs.readFile(WARN_FILE, "utf8")); }
+  catch { return {}; }
 }
+
 async function saveWarnings(data) {
   await fs.writeFile(WARN_FILE, JSON.stringify(data, null, 2));
 }
 
 // =====================================================
-// AI MEMORY + CALL
+// AI MEMORY
 // =====================================================
+
 const memory = new Map();
 
 async function callAI(userId, text) {
-  if (!OPENROUTER_API_KEY) return "AI is not configured.";
+  if (!OPENROUTER_API_KEY) return "AI not configured.";
 
   if (!memory.has(userId)) memory.set(userId, []);
   const convo = memory.get(userId);
+
   convo.push({ role: "user", content: text });
   if (convo.length > 10) convo.shift();
 
@@ -92,8 +89,7 @@ async function callAI(userId, text) {
     },
     body: JSON.stringify({
       model: "openai/gpt-4o-mini",
-      messages: convo,
-      max_tokens: 500
+      messages: convo
     })
   });
 
@@ -104,116 +100,105 @@ async function callAI(userId, text) {
 }
 
 // =====================================================
-// MESSAGE FILTERING
+// SLASH COMMANDS
 // =====================================================
-function shouldReply(msg) {
-  if (msg.author.bot) return false;
-  if (!msg.guild) return true; // DM
-  if (msg.mentions.has(client.user)) return true;
-  if (msg.content.toLowerCase().startsWith("!ask")) return true;
-  return false;
-}
 
-function extractText(msg) {
-  let t = msg.content.replace(`<@${client.user.id}>`, "").trim();
-  if (t.toLowerCase().startsWith("!ask")) t = t.slice(4).trim();
-  return t || "Hello!";
-}
-
-// =====================================================
-// SLASH COMMANDS (GLOBAL + MOD)
-// =====================================================
 const globalCommands = [
   new SlashCommandBuilder()
     .setName("ask")
     .setDescription("Ask the AI")
     .addStringOption(o =>
-      o.setName("question").setDescription("Your question").setRequired(true)
+      o.setName("question")
+       .setDescription("Your question")
+       .setRequired(true)
     ),
-  new SlashCommandBuilder().setName("help").setDescription("Help menu")
+  new SlashCommandBuilder()
+    .setName("help")
+    .setDescription("Help menu")
 ].map(c => c.toJSON());
 
 const guildCommands = [
+
   new SlashCommandBuilder()
     .setName("kick")
     .setDescription("Kick a member")
-    .addUserOption(o =>
-      o.setName("target").setDescription("Member").setRequired(true)
-    ),
+    .addUserOption(o => o.setName("target").setDescription("Member").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("ban")
     .setDescription("Ban a member")
-    .addUserOption(o =>
-      o.setName("target").setDescription("Member").setRequired(true)
-    ),
+    .addUserOption(o => o.setName("target").setDescription("Member").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("unban")
     .setDescription("Unban a member")
-    .addUserOption(o => o.setName("target").setDescription("Member to unban").setRequired(true)),
+    .addUserOption(o => o.setName("target").setDescription("Member").setRequired(true)),
+
   new SlashCommandBuilder()
     .setName("mute")
-    .setDescription("Timeout a member (minutes)")
-    .addUserOption(o =>
-      o.setName("target").setDescription("Member").setRequired(true)
-    )
-    .addIntegerOption(o =>
-      o.setName("minutes").setDescription("Minutes").setRequired(true)
-    ),
+    .setDescription("Timeout a member")
+    .addUserOption(o => o.setName("target").setDescription("Member").setRequired(true))
+    .addIntegerOption(o => o.setName("minutes").setDescription("Minutes").setRequired(true)),
 
   new SlashCommandBuilder()
     .setName("unmute")
-    .setDescription("Remove timeout from a member")
-    .addUserOption(o => o.setName("target").setDescription("Member to unmute").setRequired(true)),
+    .setDescription("Remove timeout")
+    .addUserOption(o => o.setName("target").setDescription("Member").setRequired(true)),
+
   new SlashCommandBuilder()
     .setName("warn")
-    .setDescription("Warn a member")
-    .addUserOption(o =>
-      o.setName("target").setDescription("Member").setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName("reason").setDescription("Reason").setRequired(false)
-    ),
+    .setDescription("Warn member")
+    .addUserOption(o => o.setName("target").setDescription("Member").setRequired(true))
+    .addStringOption(o => o.setName("reason").setDescription("Reason")),
 
   new SlashCommandBuilder()
     .setName("warnings")
     .setDescription("View warnings")
-    .addUserOption(o =>
-      o.setName("target").setDescription("Member").setRequired(false)
-    ),
+    .addUserOption(o => o.setName("target").setDescription("Member")),
 
   new SlashCommandBuilder()
     .setName("clear")
     .setDescription("Clear messages")
-    .addIntegerOption(o =>
-      o.setName("amount").setDescription("Count").setRequired(true)
-    )
+    .addIntegerOption(o => o.setName("amount").setDescription("Count").setRequired(true))
+
 ].map(c => c.toJSON());
 
-// === Register slash commands ===
+// =====================================================
+// REGISTER COMMANDS
+// =====================================================
+
 async function registerSlashCommands() {
-  const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
+
+  const rest = new REST({ version: "10" }).setToken(TOKEN);
 
   try {
-    // 🌍 Global commands (non-mod)s
+
+    await rest.put(
+      Routes.applicationCommands(client.user.id),
+      { body: globalCommands }
+    );
+
     await rest.put(
       Routes.applicationGuildCommands(client.user.id, GUILD_ID),
-      { body: commands }
+      { body: guildCommands }
     );
 
     console.log("✅ Commands registered correctly.");
+
   } catch (err) {
     console.error("❌ Command registration failed:", err);
   }
 }
 
 // =====================================================
-// READY + ACTIVITIES (LONG LIST)
+// READY EVENT + ACTIVITIES
 // =====================================================
+
 client.once("ready", async () => {
+
   console.log(`ONLINE as ${client.user.tag}`);
-  await registerCommands();
+
+  await registerSlashCommands();
 
   const activities = [
     "🧠 AI Chat",
@@ -235,44 +220,42 @@ client.once("ready", async () => {
   ];
 
   let i = 0;
+
   setInterval(() => {
     client.user.setPresence({
       status: "online",
       activities: [{ name: activities[i], type: 0 }]
     });
+
     i = (i + 1) % activities.length;
   }, 15000);
 });
 
 // =====================================================
-// SLASH INTERACTIONS
+// INTERACTIONS
 // =====================================================
+
 client.on("interactionCreate", async i => {
+
   if (!i.isChatInputCommand()) return;
 
   const cmd = i.commandName;
 
   if (cmd === "ask") {
     await i.deferReply();
-    const q = i.options.getString("question");
-    const r = await callAI(i.user.id, q);
-    await i.editReply(r.slice(0, 2000));
+    const r = await callAI(i.user.id, i.options.getString("question"));
+    return i.editReply(r.slice(0, 2000));
   }
 
-  if (cmd === "help") {
-    await i.reply({
-      content:
-        "Use:\n/ask\n!ask\n@mention\nDM\nModeration enabled",
-      ephemeral: true
-    });
-  }
+  if (cmd === "help")
+    return i.reply({ content: "Use /ask or moderation commands.", ephemeral: true });
 
   if (cmd === "kick") {
     if (!i.memberPermissions.has(PermissionFlagsBits.KickMembers))
       return i.reply({ content: "No permission", ephemeral: true });
     const u = i.options.getUser("target");
     await i.guild.members.kick(u.id);
-    await i.reply(`Kicked ${u.tag}`);
+    return i.reply(`Kicked ${u.tag}`);
   }
 
   if (cmd === "ban") {
@@ -280,64 +263,50 @@ client.on("interactionCreate", async i => {
       return i.reply({ content: "No permission", ephemeral: true });
     const u = i.options.getUser("target");
     await i.guild.members.ban(u.id);
-    await i.reply(`Banned ${u.tag}`);
+    return i.reply(`Banned ${u.tag}`);
   }
 
-    // unban
-    if (cmd === "unban") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "You lack Ban Members permission.", ephemeral: true });
-      const target = interaction.options.getUser("target");
-      await interaction.guild.members.unban(target.id).catch(err => { throw err; });
-      await interaction.reply(`✅ Unbanned ${target.tag}`);
-      await sendLog(client, `🔨 ${interaction.user.tag} unbanned ${target.tag}`);
-    } 
+  if (cmd === "unban") {
+    const u = i.options.getUser("target");
+    await i.guild.members.unban(u.id);
+    return i.reply(`Unbanned ${u.tag}`);
+  }
 
-    // mute (timeout)
-    if (cmd === "mute") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "You lack Moderate Members permission.", ephemeral: true });
-      const target = interaction.options.getUser("target");
-      const minutes = interaction.options.getInteger("minutes");
-      const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-      if (!member) return interaction.reply({ content: "Member not found.", ephemeral: true });
-      const until = minutes > 0 ? Date.now() + minutes * 60 * 1000 : null;
-      await member.timeout(minutes * 60 * 1000, `Muted by ${interaction.user.tag}`).catch(e => { throw e; });
-      await interaction.reply(`🔇 ${target.tag} muted for ${minutes} minute(s).`);
-      await sendLog(client, `🔇 ${interaction.user.tag} muted ${target.tag} for ${minutes} minutes.`);
-    }
+  if (cmd === "mute") {
+    const u = i.options.getUser("target");
+    const minutes = i.options.getInteger("minutes");
+    const member = await i.guild.members.fetch(u.id);
+    await member.timeout(minutes * 60000);
+    return i.reply(`Muted ${u.tag}`);
+  }
 
-    // unmute (remove timeout)
-    if (cmd === "unmute") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "You lack Moderate Members permission.", ephemeral: true });
-      const target = interaction.options.getUser("target");
-      const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-      if (!member) return interaction.reply({ content: "Member not found.", ephemeral: true });
-      await member.timeout(null, `Unmuted by ${interaction.user.tag}`).catch(e => { throw e; });
-      await interaction.reply(`🔊 ${target.tag} unmuted.`);
-      await sendLog(client, `🔊 ${interaction.user.tag} unmuted ${target.tag}.`);
-    }
+  if (cmd === "unmute") {
+    const u = i.options.getUser("target");
+    const member = await i.guild.members.fetch(u.id);
+    await member.timeout(null);
+    return i.reply(`Unmuted ${u.tag}`);
+  }
 
-    // warn
-    if (cmd === "warn") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "You lack permission to warn.", ephemeral: true });
-      const target = interaction.options.getUser("target");
-      const reason = interaction.options.getString("reason") || "No reason provided";
-      const warns = await loadWarnings();
-      if (!warns[interaction.guild.id]) warns[interaction.guild.id] = {};
-      if (!warns[interaction.guild.id][target.id]) warns[interaction.guild.id][target.id] = [];
-      warns[interaction.guild.id][target.id].push({ moderator: interaction.user.tag, reason, time: new Date().toISOString() });
-      await saveWarnings(warns);
-      await interaction.reply(`⚠️ Warned ${target.tag}: ${reason}`);
-      await sendLog(client, `⚠️ ${interaction.user.tag} warned ${target.tag}: ${reason}`);
-    }
+  if (cmd === "warn") {
+    const u = i.options.getUser("target");
+    const reason = i.options.getString("reason") || "No reason";
+    const warns = await loadWarnings();
+
+    if (!warns[i.guild.id]) warns[i.guild.id] = {};
+    if (!warns[i.guild.id][u.id]) warns[i.guild.id][u.id] = [];
+
+    warns[i.guild.id][u.id].push({ reason });
+    await saveWarnings(warns);
+
+    return i.reply(`Warned ${u.tag}`);
+  }
 
   if (cmd === "warnings") {
     const u = i.options.getUser("target") || i.user;
     const warns = await loadWarnings();
     const list = warns[i.guild.id]?.[u.id] || [];
-    await i.reply({
-      content: list.length
-        ? list.map((w, x) => `${x + 1}. ${w.reason}`).join("\n")
-        : "No warnings",
+    return i.reply({
+      content: list.length ? JSON.stringify(list) : "No warnings",
       ephemeral: true
     });
   }
@@ -345,25 +314,14 @@ client.on("interactionCreate", async i => {
   if (cmd === "clear") {
     const amt = i.options.getInteger("amount");
     await i.channel.bulkDelete(amt, true);
-    await i.reply({ content: "Messages cleared", ephemeral: true });
+    return i.reply({ content: "Messages cleared", ephemeral: true });
   }
 });
 
 // =====================================================
-// MESSAGE AI (!ask / mention / DM)
+// START BOT
 // =====================================================
-client.on("messageCreate", async msg => {
-  if (!shouldReply(msg)) return;
-  try {
-    const text = extractText(msg);
-    const r = await callAI(msg.author.id, text);
-    await msg.reply(r.slice(0, 2000));
-  } catch {
-    msg.reply("Error processing message.");
-  }
-});
 
-// =====================================================
-// START
-// =====================================================
+console.log("Starting Discord login...");
 client.login(TOKEN);
+
