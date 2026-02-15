@@ -323,5 +323,8 @@ client.on("interactionCreate", async i => {
 // =====================================================
 
 console.log("Starting Discord login...");
-client.login(TOKEN);
+client.login(TOKEN)
+  .then(() => console.log("LOGIN SUCCESS"))
+  .catch(err => console.error("LOGIN FAILED:", err));
+
 
