@@ -153,10 +153,18 @@ const commands = [
     .addUserOption(o => o.setName("target").setDescription("Member to ban").setRequired(true))
     .addStringOption(o => o.setName("reason").setDescription("Reason")),
   new SlashCommandBuilder()
+    .setName("unban")
+    .setDescription("Unban a member")
+    .addUserOption(o => o.setName("target").setDescription("Member to unban").setRequired(true)),
+  new SlashCommandBuilder()
     .setName("mute")
     .setDescription("Temporarily timeout a member (in minutes)")
     .addUserOption(o => o.setName("target").setDescription("Member to mute").setRequired(true))
     .addIntegerOption(o => o.setName("minutes").setDescription("Duration in minutes").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("unmute")
+    .setDescription("Remove timeout from a member")
+    .addUserOption(o => o.setName("target").setDescription("Member to unmute").setRequired(true)),
   new SlashCommandBuilder()
     .setName("warn")
     .setDescription("Warn a member")
@@ -177,16 +185,10 @@ async function registerSlashCommands() {
   const rest = new REST({ version: "10" }).setToken(DISCORD_BOT_TOKEN);
 
   try {
-    // 🌍 Global commands (non-mod)
-    await rest.put(
-      Routes.applicationCommands(client.user.id),
-      { body: globalCommands }
-    );
-
-    // 🏠 Server-only moderation commands
+    // 🌍 Global commands (non-mod)s
     await rest.put(
       Routes.applicationGuildCommands(client.user.id, GUILD_ID),
-      { body: guildCommands }
+      { body: commands }
     );
 
     console.log("✅ Commands registered correctly.");
@@ -270,6 +272,15 @@ client.on("interactionCreate", async interaction => {
       await sendLog(client, `🔨 ${interaction.user.tag} banned ${target.tag} — ${reason}`);
     }
 
+    // unban
+    if (cmd === "unban") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "You lack Ban Members permission.", ephemeral: true });
+      const target = interaction.options.getUser("target");
+      await interaction.guild.members.unban(target.id).catch(err => { throw err; });
+      await interaction.reply(`✅ Unbanned ${target.tag}`);
+      await sendLog(client, `🔨 ${interaction.user.tag} unbanned ${target.tag}`);
+    } 
+
     // mute (timeout)
     if (cmd === "mute") {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "You lack Moderate Members permission.", ephemeral: true });
@@ -281,6 +292,17 @@ client.on("interactionCreate", async interaction => {
       await member.timeout(minutes * 60 * 1000, `Muted by ${interaction.user.tag}`).catch(e => { throw e; });
       await interaction.reply(`🔇 ${target.tag} muted for ${minutes} minute(s).`);
       await sendLog(client, `🔇 ${interaction.user.tag} muted ${target.tag} for ${minutes} minutes.`);
+    }
+
+    // unmute (remove timeout)
+    if (cmd === "unmute") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "You lack Moderate Members permission.", ephemeral: true });
+      const target = interaction.options.getUser("target");
+      const member = await interaction.guild.members.fetch(target.id).catch(() => null);
+      if (!member) return interaction.reply({ content: "Member not found.", ephemeral: true });
+      await member.timeout(null, `Unmuted by ${interaction.user.tag}`).catch(e => { throw e; });
+      await interaction.reply(`🔊 ${target.tag} unmuted.`);
+      await sendLog(client, `🔊 ${interaction.user.tag} unmuted ${target.tag}.`);
     }
 
     // warn
