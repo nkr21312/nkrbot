@@ -321,10 +321,16 @@ client.on("interactionCreate", async i => {
 // =====================================================
 // START BOT
 // =====================================================
-
 console.log("Starting Discord login...");
-client.login(TOKEN)
-  .then(() => console.log("LOGIN SUCCESS"))
-  .catch(err => console.error("LOGIN FAILED:", err));
+
+(async () => {
+  try {
+    await client.login(TOKEN);
+    console.log("LOGIN SUCCESS");
+  } catch (err) {
+    console.error("LOGIN FAILED:", err);
+  }
+})();
+
 
 
