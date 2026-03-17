@@ -18,13 +18,13 @@ import express from "express";
 import fs from "fs/promises";
 import path from "path";
 
+
 // === Config / tokens ===
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID; // optional, set in Render
 const GUILD_ID = process.env.GUILD_ID;
-
-
+process.env.GENERAL_CHANNEL_ID = process.env.GENERAL_CHANNEL_ID; // for public mod messages
 if (!DISCORD_BOT_TOKEN) {
   console.error("Missing DISCORD_BOT_TOKEN in environment. Exiting.");
   process.exit(1);
@@ -63,7 +63,35 @@ async function loadWarnings() {
 async function saveWarnings(obj) {
   await fs.writeFile(WARN_FILE, JSON.stringify(obj, null, 2), "utf8");
 }
+async function sendPublicModMessage(client, action, target, moderator, reason, extra = {}) {
 
+  const embed = {
+    color: extra.color || 0xff0000,
+    title: `🚨 ${action}`,
+    fields: [
+      { name: "👤 User", value: `<@${target.id}> (${target.tag})`, inline: true },
+      { name: "🛡 Moderator", value: `<@${moderator.id}>`, inline: true },
+      { name: "📝 Reason", value: reason || "No reason provided" }
+    ],
+    timestamp: new Date()
+  };
+
+  if (extra.duration)
+    embed.fields.push({ name: "⏱ Duration", value: extra.duration });
+
+  await sendToGeneral(client, embed);
+}
+
+async function sendToGeneral(client, embed) {
+  try {
+    const channel = await client.channels.fetch(process.env.GENERAL_CHANNEL_ID);
+    if (channel && channel.isTextBased()) {
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (err) {
+    console.error("Failed to send to general:", err);
+  }
+}
 // === In-memory conversation memory (AI) ===
 const memory = new Map();
 
@@ -76,9 +104,22 @@ async function sendLog(client, content) {
       await channel.send(content);
     }
   } catch (err) {
-    console.error("Failed to send log:", err);
-  }
+  console.error("Interaction error:", err);
+
+  const msg = "⚠️ An error occurred while processing the command.";
+
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(msg);
+    } else {
+      await interaction.reply({ content: msg, flags: 64 });
+    }
+  } catch {}
+
+  await sendLog(client, `⚠️ Command error: ${err.message}`);
 }
+  }
+
 
 // === Helper: AI call (OpenRouter) ===
 async function callOpenRouter(userId, userText) {
@@ -255,35 +296,52 @@ client.on("interactionCreate", async interaction => {
 
     // donate
     if (cmd === "donate") {
-      await interaction.reply({ content: "Support: https://ko-fi.com/yourlink", ephemeral: true });
+      await interaction.reply({ content: "Support: https://ko-fi.com/yourlink", flags: 64 });
     }
 
     // moderation: kick
     if (cmd === "kick") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "You lack Kick Members permission.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "You lack Kick Members permission.", flags: 64 });
       const target = interaction.options.getUser("target");
       const reason = interaction.options.getString("reason") || "No reason provided";
       const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-      if (!member) return interaction.reply({ content: "Member not found.", ephemeral: true });
-      if (!member.kickable) return interaction.reply({ content: "I cannot kick that user.", ephemeral: true });
+      if (!member) return interaction.reply({ content: "Member not found.", flags: 64 });
+      if (!member.kickable) return interaction.reply({ content: "I cannot kick that user.", flags: 64 });
       await member.kick(reason);
       await interaction.reply(`✅ Kicked ${target.tag} — ${reason}`);
       await sendLog(client, `🔨 ${interaction.user.tag} kicked ${target.tag} — ${reason}`);
+      await sendPublicModMessage(
+        client,
+        "User Kicked",
+        target,
+        interaction.user,
+        reason,
+        { color: 0xFFA500 }
+      );
     }
 
     // ban
     if (cmd === "ban") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "You lack Ban Members permission.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.BanMembers)) return interaction.reply({ content: "You lack Ban Members permission.", flags: 64 });
       const target = interaction.options.getUser("target");
       const reason = interaction.options.getString("reason") || "No reason provided";
       await interaction.guild.members.ban(target.id, { reason }).catch(err => { throw err; });
-      await interaction.reply(`✅ Banned ${target.tag} — ${reason}`);
+      await interaction.reply({content: `✅ Banned ${target.tag}`,flags: 64});
       await sendLog(client, `🔨 ${interaction.user.tag} banned ${target.tag} — ${reason}`);
+
+await sendPublicModMessage(
+  client,
+  "User Banned",
+  target,
+  interaction.user,
+  reason,
+  { color: 0xff0000 }
+);
     }
     // unban
   if (cmd === "unban") {
     if (!interaction.memberPermissions.has(PermissionFlagsBits.BanMembers))
-    return interaction.reply({ content: "You lack Ban Members permission.", ephemeral: true });
+    return interaction.reply({ content: "You lack Ban Members permission.", flags: 64 });
 
   const userId = interaction.options.getString("userid");
 
@@ -291,43 +349,67 @@ client.on("interactionCreate", async interaction => {
     await interaction.guild.members.unban(userId);
     await interaction.reply(`✅ Unbanned user with ID ${userId}`);
     await sendLog(client, `♻️ ${interaction.user.tag} unbanned ${userId}`);
+    await sendPublicModMessage(
+      client,
+      "User Unbanned",
+      { id: userId, tag: `ID:${userId}` },
+      interaction.user,
+      "Unban",
+      { color: 0x2ECC71 }
+    );
   } catch (err) {
-    await interaction.reply({ content: "Failed to unban. Check the user ID.", ephemeral: true });
+    await interaction.reply({ content: "Failed to unban. Check the user ID.", flags: 64 });
   }
 }
 // unmute (remove timeout) 
   if (cmd === "unmute") {
     if (!interaction.memberPermissions.has(PermissionFlagsBits.ModerateMembers))
-    return interaction.reply({ content: "You lack Moderate Members permission.", ephemeral: true });
+    return interaction.reply({ content: "You lack Moderate Members permission.", flags: 64 });
 
   const target = interaction.options.getUser("target");
   const member = await interaction.guild.members.fetch(target.id).catch(() => null);
 
   if (!member)
-    return interaction.reply({ content: "Member not found.", ephemeral: true });
+    return interaction.reply({ content: "Member not found.", flags: 64 });
 
   await member.timeout(null, `Unmuted by ${interaction.user.tag}`).catch(e => { throw e; });
 
   await interaction.reply(`🔊 ${target.tag} has been unmuted.`);
   await sendLog(client, `🔊 ${interaction.user.tag} unmuted ${target.tag}`);
+  await sendPublicModMessage(
+    client,
+    "User Unmuted",
+    target,
+    interaction.user,
+    "Timeout removed",
+    { color: 0x2ECC71 }
+  );
+
 }
 
     // mute (timeout)
     if (cmd === "mute") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "You lack Moderate Members permission.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.ModerateMembers)) return interaction.reply({ content: "You lack Moderate Members permission.", flags: 64 });
       const target = interaction.options.getUser("target");
       const minutes = interaction.options.getInteger("minutes");
       const member = await interaction.guild.members.fetch(target.id).catch(() => null);
-      if (!member) return interaction.reply({ content: "Member not found.", ephemeral: true });
+      if (!member) return interaction.reply({ content: "Member not found.", flags: 64 });
       const until = minutes > 0 ? Date.now() + minutes * 60 * 1000 : null;
       await member.timeout(minutes * 60 * 1000, `Muted by ${interaction.user.tag}`).catch(e => { throw e; });
       await interaction.reply(`🔇 ${target.tag} muted for ${minutes} minute(s).`);
-      await sendLog(client, `🔇 ${interaction.user.tag} muted ${target.tag} for ${minutes} minutes.`);
+     await sendPublicModMessage(
+  client,
+  "User Muted",
+  target,
+  interaction.user,
+  "Timeout",
+  { duration: `${minutes} minute(s)`, color: 0xFFD700 }
+);
     }
 
     // warn
     if (cmd === "warn") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "You lack permission to warn.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.KickMembers)) return interaction.reply({ content: "You lack permission to warn.", flags: 64 });
       const target = interaction.options.getUser("target");
       const reason = interaction.options.getString("reason") || "No reason provided";
       const warns = await loadWarnings();
@@ -344,25 +426,25 @@ client.on("interactionCreate", async interaction => {
       const target = interaction.options.getUser("target") || interaction.user;
       const warns = await loadWarnings();
       const list = (warns[interaction.guild.id] && warns[interaction.guild.id][target.id]) || [];
-      if (list.length === 0) return interaction.reply({ content: `${target.tag} has no warnings.`, ephemeral: true });
+      if (list.length === 0) return interaction.reply({ content: `${target.tag} has no warnings.`, flags: 64 });
       const lines = list.map((w, i) => `${i + 1}. ${w.reason} — by ${w.moderator} on ${w.time}`).join("\n");
-      await interaction.reply({ content: `Warnings for ${target.tag}:\n${lines}`, ephemeral: true });
+      await interaction.reply({ content: `Warnings for ${target.tag}:\n${lines}`, flags: 64 });
     }
 
     // clear messages
     if (cmd === "clear") {
-      if (!interaction.memberPermissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "You lack Manage Messages permission.", ephemeral: true });
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.ManageMessages)) return interaction.reply({ content: "You lack Manage Messages permission.", flags: 64 });
       const amount = interaction.options.getInteger("amount");
-      if (amount < 1 || amount > 100) return interaction.reply({ content: "Amount must be between 1 and 100.", ephemeral: true });
+      if (amount < 1 || amount > 100) return interaction.reply({ content: "Amount must be between 1 and 100.", flags: 64 });
       const channel = interaction.channel;
       const deleted = await channel.bulkDelete(amount, true).catch(() => null);
-      await interaction.reply({ content: `🧹 Deleted ${deleted?.size || 0} messages.`, ephemeral: true });
+      await interaction.reply({ content: `🧹 Deleted ${deleted?.size || 0} messages.`, flags: 64 });
       await sendLog(client, `🧹 ${interaction.user.tag} deleted ${deleted?.size || 0} messages in #${channel.name}`);
     }
 
   } catch (err) {
     console.error("Interaction error:", err);
-    await interaction.reply({ content: "⚠️ An error occurred while processing the command.", ephemeral: true });
+    await interaction.reply({ content: "⚠️ An error occurred while processing the command.", flags: 64 });
     await sendLog(client, `⚠️ Command error: ${err.message}`);
   }
 });
