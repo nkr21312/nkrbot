@@ -29,7 +29,10 @@ if (!DISCORD_BOT_TOKEN) {
   console.error("Missing DISCORD_BOT_TOKEN in environment. Exiting.");
   process.exit(1);
 }
-
+const DISABLED_AI_CHANNELS = [
+  "1500364318435446814",
+  "1495280739674099892"
+];
 // === Discord client ===
 const client = new Client({
   intents: [
@@ -160,9 +163,23 @@ async function callOpenRouter(userId, userText) {
 // === Helper: message filtering ===
 function shouldReply(message) {
   if (message.author.bot) return false;
-  if (message.channel?.type === 1) return true; // DM
+
+  // Allow DMs
+  if (message.channel?.type === 1) return true;
+
+  // Disable AI in specific channels
+  if (DISABLED_AI_CHANNELS.includes(message.channel.id)) {
+    return false;
+  }
+
+  // Mention AI
   if (message.mentions?.has(client.user)) return true;
-  if (message.content.trim().toLowerCase().startsWith("!")) return true;
+
+  // ! AI trigger
+  if (message.content.trim().toLowerCase().startsWith("!")) {
+    return true;
+  }
+
   return false;
 }
 function extractUserText(message) {
