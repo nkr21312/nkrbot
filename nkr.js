@@ -308,30 +308,28 @@ function shouldReply(message) {
   // Allow DMs
   if (message.channel?.type === 1) return true;
 
-  // Only apply AI channel restriction in one server
-  if (message.guild && message.guild.id === AI_SERVER_ID) {
+  // Detect AI trigger first
+  const isAIMessage =
+    message.content.trim().startsWith("!") ||
+    message.mentions?.has(client.user);
 
-    // Allow only selected channels
-    if (!ALLOWED_AI_CHANNELS.includes(message.channel.id)) {
+  // Ignore normal messages
+  if (!isAIMessage) return false;
 
-      // Tell user correct channel
-      message.reply(
-        `❌ AI commands only work in <#${ALLOWED_AI_CHANNELS[0]}>`
-      ).catch(() => {});
+  // Restrict AI in one server only
+  if (
+    message.guild &&
+    message.guild.id === AI_SERVER_ID &&
+    !ALLOWED_AI_CHANNELS.includes(message.channel.id)
+  ) {
+    message.reply(
+      `❌ AI commands only work in <#${ALLOWED_AI_CHANNELS[0]}>`
+    ).catch(() => {});
 
-      return false;
-    }
+    return false;
   }
 
-  // Mention AI
-  if (message.mentions?.has(client.user)) return true;
-
-  // ! trigger
-  if (message.content.trim().toLowerCase().startsWith("!")) {
-    return true;
-  }
-
-  return false;
+  return true;
 }
 function extractUserText(message) {
   let text = message.content.trim();
