@@ -31,103 +31,15 @@ if (!DISCORD_BOT_TOKEN) {
   console.error("Missing DISCORD_BOT_TOKEN in environment. Exiting.");
   process.exit(1);
 }
-const DISABLED_AI_CHANNELS = [
-  "1500364318435446814",
-  "1495280739674099892"
+// AI allowed channels ONLY for secondary server
+const AI_SERVER_ID = "1155780893311520788";
+
+const ALLOWED_AI_CHANNELS = [
+  "1169991875709636628"
 ];
 const DISABLED_LEVELING_GUILDS = [
   "1255904591875280997"
 ];
-// === Level Roles Configuration ===
-const ROLE_PREFIX = "Level "; // Prefix for level roles (e.g., "Level 5")
-
-// Role colors for each level milestone (customize as needed)
-const LEVEL_COLORS = {
-  5: 0x1abc9c,    // Teal
-  10: 0x3498db,   // Blue
-  15: 0x9b59b6,   // Purple
-  20: 0xe74c3c,   // Red
-  25: 0xf39c12,   // Orange
-  30: 0xf1c40f,   // Gold
-  50: 0x2ecc71,   // Green
-  100: 0x34495e   // Dark Gray
-};
-
-// Get role color for level
-function getRoleColor(level) {
-  const milestones = Object.keys(LEVEL_COLORS)
-    .map(Number)
-    .sort((a, b) => b - a);
-  
-  for (const milestone of milestones) {
-    if (level >= milestone) return LEVEL_COLORS[milestone];
-  }
-  return 0x95a5a6; // Default gray for new levels
-}
-
-// Create or get level role
-async function getOrCreateLevelRole(guild, level) {
-  try {
-    const roleName = `${ROLE_PREFIX}${level}`;
-    const roleColor = getRoleColor(level);
-    
-    // Check if role already exists
-    let role = guild.roles.cache.find(r => r.name === roleName);
-    
-    if (!role) {
-      // Create new role
-      role = await guild.roles.create({
-        name: roleName,
-        color: roleColor,
-        mentionable: true,  // Make role pingable
-        reason: `Auto-created for level ${level} system`
-        // Note: position parameter removed - not recommended in discord.js
-      });
-      console.log(`✅ Created role: "${roleName}" (Color: #${roleColor.toString(16).padStart(6, '0')}) - Mentionable: Yes`);
-    }
-    
-    return role;
-  } catch (err) {
-    console.error(`Failed to create/get role for level ${level}:`, err);
-    return null;
-  }
-}
-
-// Assign level role to user and remove ALL old level roles
-async function assignLevelRole(guild, userId, newLevel, oldLevel = 0) {
-  try {
-    // Get member
-    const member = await guild.members.fetch(userId).catch(() => null);
-    if (!member) return;
-    
-    // Get new level role (create if doesn't exist)
-    const newRole = await getOrCreateLevelRole(guild, newLevel);
-    if (!newRole) return;
-    
-    // Add new level role
-    if (!member.roles.cache.has(newRole.id)) {
-      await member.roles.add(newRole, `Leveled up to ${newLevel}`);
-      console.log(`✅ Added role "${newRole.name}" to ${member.user.tag}`);
-    }
-    
-    // Remove ALL old level roles (not just the previous one)
-    const allLevelRoles = guild.roles.cache.filter(r => r.name.startsWith(ROLE_PREFIX));
-    
-    for (const [roleId, role] of allLevelRoles) {
-      // Skip the new level role
-      if (role.id === newRole.id) continue;
-      
-      // Remove any other level role they have
-      if (member.roles.cache.has(roleId)) {
-        await member.roles.remove(roleId, `Leveled up to ${newLevel}`);
-        console.log(`✅ Removed old role "${role.name}" from ${member.user.tag}`);
-      }
-    }
-  } catch (err) {
-    console.error(`Failed to assign level role:`, err);
-  }
-}
-
 // === Leveling System Config ===
 const XP_PER_MESSAGE = 10; // Base XP per message
 const LEVEL_MULTIPLIER = 1.2; // Each level requires 20% more XP (1.2x)
@@ -396,15 +308,25 @@ function shouldReply(message) {
   // Allow DMs
   if (message.channel?.type === 1) return true;
 
-  // Disable AI in specific channels
-  if (DISABLED_AI_CHANNELS.includes(message.channel.id)) {
-    return false;
+  // Only apply AI channel restriction in one server
+  if (message.guild && message.guild.id === AI_SERVER_ID) {
+
+    // Allow only selected channels
+    if (!ALLOWED_AI_CHANNELS.includes(message.channel.id)) {
+
+      // Tell user correct channel
+      message.reply(
+        `❌ AI commands only work in <#${ALLOWED_AI_CHANNELS[0]}>`
+      ).catch(() => {});
+
+      return false;
+    }
   }
 
   // Mention AI
   if (message.mentions?.has(client.user)) return true;
 
-  // ! AI trigger
+  // ! trigger
   if (message.content.trim().toLowerCase().startsWith("!")) {
     return true;
   }
@@ -436,10 +358,6 @@ const commands = [
   new SlashCommandBuilder()
     .setName("leaderboard")
     .setDescription("Show top 10 users by level"),
-  new SlashCommandBuilder()
-    .setName("syncroles")
-    .setDescription("Manually sync level roles for a user")
-    .addUserOption(o => o.setName("user").setDescription("User to sync (optional)")),
   // Moderation
   new SlashCommandBuilder()
     .setName("kick")
@@ -591,21 +509,6 @@ client.on("interactionCreate", async interaction => {
       };
       
       await interaction.reply({ embeds: [embed] });
-    }
-
-    // syncroles - Manually sync level roles
-    if (cmd === "syncroles") {
-      const targetUser = interaction.options.getUser("user") || interaction.user;
-      const levelInfo = await getUserLevelInfo(interaction.guild.id, targetUser.id);
-      
-      await interaction.deferReply({ flags: 64 });
-      
-      // Assign role
-      await assignLevelRole(interaction.guild, targetUser.id, levelInfo.level, 0);
-      
-      await interaction.editReply({
-        content: `✅ Synced roles for <@${targetUser.id}> - Assigned to Level ${levelInfo.level}`
-      });
     }
 
     // === MODERATION COMMANDS ===
@@ -773,8 +676,6 @@ client.on("messageCreate", async message => {
         // Send level-up announcement
         await sendLevelUpMessage(client, message.author.id, result.newLevel, result.totalXP, message.guild.id);
         
-        // Assign level role automatically
-        await assignLevelRole(message.guild, message.author.id, result.newLevel, result.oldLevel);
       }
     }
 
