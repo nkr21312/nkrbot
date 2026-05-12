@@ -77,10 +77,11 @@ async function getOrCreateLevelRole(guild, level) {
       role = await guild.roles.create({
         name: roleName,
         color: roleColor,
-        reason: `Auto-created for level ${level} system`,
-        position: 1 // Position near top (adjust if needed)
+        mentionable: true,  // Make role pingable
+        reason: `Auto-created for level ${level} system`
+        // Note: position parameter removed - not recommended in discord.js
       });
-      console.log(`✅ Created role: "${roleName}" (Color: #${roleColor.toString(16).padStart(6, '0')})`);
+      console.log(`✅ Created role: "${roleName}" (Color: #${roleColor.toString(16).padStart(6, '0')}) - Mentionable: Yes`);
     }
     
     return role;
