@@ -91,7 +91,7 @@ async function getOrCreateLevelRole(guild, level) {
   }
 }
 
-// Assign level role to user and remove old role
+// Assign level role to user and remove ALL old level roles
 async function assignLevelRole(guild, userId, newLevel, oldLevel = 0) {
   try {
     // Get member
@@ -108,14 +108,17 @@ async function assignLevelRole(guild, userId, newLevel, oldLevel = 0) {
       console.log(`✅ Added role "${newRole.name}" to ${member.user.tag}`);
     }
     
-    // Remove old level role if exists
-    if (oldLevel > 0 && oldLevel !== newLevel) {
-      const oldRoleName = `${ROLE_PREFIX}${oldLevel}`;
-      const oldRole = guild.roles.cache.find(r => r.name === oldRoleName);
+    // Remove ALL old level roles (not just the previous one)
+    const allLevelRoles = guild.roles.cache.filter(r => r.name.startsWith(ROLE_PREFIX));
+    
+    for (const [roleId, role] of allLevelRoles) {
+      // Skip the new level role
+      if (role.id === newRole.id) continue;
       
-      if (oldRole && member.roles.cache.has(oldRole.id)) {
-        await member.roles.remove(oldRole, `Leveled up to ${newLevel}`);
-        console.log(`✅ Removed role "${oldRole.name}" from ${member.user.tag}`);
+      // Remove any other level role they have
+      if (member.roles.cache.has(roleId)) {
+        await member.roles.remove(roleId, `Leveled up to ${newLevel}`);
+        console.log(`✅ Removed old role "${role.name}" from ${member.user.tag}`);
       }
     }
   } catch (err) {
