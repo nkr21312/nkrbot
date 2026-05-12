@@ -35,7 +35,9 @@ const DISABLED_AI_CHANNELS = [
   "1500364318435446814",
   "1495280739674099892"
 ];
-
+const DISABLED_LEVELING_GUILDS = [
+  "1255904591875280997"
+];
 // === Level Roles Configuration ===
 const ROLE_PREFIX = "Level "; // Prefix for level roles (e.g., "Level 5")
 
@@ -763,7 +765,7 @@ client.on("interactionCreate", async interaction => {
 client.on("messageCreate", async message => {
   try {
     // Give XP for any message (not just AI trigger messages)
-    if (!message.author.bot && message.guild) {
+    if (!message.author.bot &&message.guild &&!DISABLED_LEVELING_GUILDS.includes(message.guild.id)) {
       const result = await addXPToUser(message.guild.id, message.author.id);
       
       // Notify user on level up (send to dedicated channel)
