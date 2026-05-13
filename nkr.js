@@ -42,7 +42,7 @@ if (!DISCORD_BOT_TOKEN) {
 // === Leveling System Config (GROUP SERVER ONLY) ===
 const XP_PER_MESSAGE = 10; // Base XP per message
 const LEVEL_MULTIPLIER = 1.2; // Each level requires 20% more XP (1.2x)
-const LEVEL_FILE = path.resolve("./levels.json");
+const LEVEL_FILE = path.resolve("./levels1.json");
 
 // Calculate XP needed for a level
 function getXPForLevel(level) {
