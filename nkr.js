@@ -88,7 +88,7 @@ async function addXPToUser(guildId, userId, xpAmount = XP_PER_MESSAGE) {
   userData.totalXP += xpAmount;
   
   // Check for level up
-  let newLevel = 1;
+  let newLevel = userData.level;  // Start from current level, not 1
   while (getTotalXPForLevel(newLevel + 1) <= userData.totalXP) {
     newLevel++;
   }
