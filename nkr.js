@@ -2,7 +2,7 @@
 // === Load environment variables ===
 import dotenv from "dotenv";
 dotenv.config({ path: "./tokens.env" });
-
+import { MongoClient } from "mongodb";
 // === Imports ===
 import {
   Client,
@@ -15,8 +15,7 @@ import {
 } from "discord.js";
 import fetch from "node-fetch";
 import express from "express";
-import fs from "fs/promises";
-import path from "path";
+
 
 
 // === Config / tokens ===
@@ -38,11 +37,21 @@ if (!DISCORD_BOT_TOKEN) {
   console.error("Missing DISCORD_BOT_TOKEN in environment. Exiting.");
   process.exit(1);
 }
+const mongoClient = new MongoClient(process.env.MONGO_URI);
+
+await mongoClient.connect();
+
+console.log("✅ MongoDB connected");
+
+const db = mongoClient.db("nkrbot");
+
+const levelsCollection = db.collection("levels");
+const warningsCollection = db.collection("warnings");
 
 // === Leveling System Config (GROUP SERVER ONLY) ===
 const XP_PER_MESSAGE = 10; // Base XP per message
 const LEVEL_MULTIPLIER = 1.2; // Each level requires 20% more XP (1.2x)
-const LEVEL_FILE = path.resolve("./levels1.json");
+
 
 // Calculate XP needed for a level
 function getXPForLevel(level) {
@@ -58,95 +67,90 @@ function getTotalXPForLevel(level) {
   return total;
 }
 
-// Load leveling data
-async function loadLevels() {
-  try {
-    const raw = await fs.readFile(LEVEL_FILE, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
 
-// Save leveling data
-async function saveLevels(obj) {
-  await fs.writeFile(LEVEL_FILE, JSON.stringify(obj, null, 2), "utf8");
-}
+
 
 // Add XP to user and check for level up
 async function addXPToUser(guildId, userId, xpAmount = XP_PER_MESSAGE) {
-  const levels = await loadLevels();
-  
-  if (!levels[guildId]) levels[guildId] = {};
-  if (!levels[guildId][userId]) {
-    levels[guildId][userId] = { level: 1, totalXP: 0 };
+  let userData = await levelsCollection.findOne({ guildId, userId });
+
+  if (!userData) {
+    userData = {
+      guildId,
+      userId,
+      level: 1,
+      totalXP: 0
+    };
   }
-  
-  const userData = levels[guildId][userId];
+
   const oldLevel = userData.level;
-  
+
   userData.totalXP += xpAmount;
-  
-  // Check for level up
-  let newLevel = userData.level;  // Start from current level, not 1
+
+  let newLevel = userData.level;
+
   while (getTotalXPForLevel(newLevel + 1) <= userData.totalXP) {
     newLevel++;
   }
-  
+
   userData.level = newLevel;
-  await saveLevels(levels);
-  
+
+  await levelsCollection.updateOne(
+    { guildId, userId },
+    {
+      $set: {
+        level: userData.level,
+        totalXP: userData.totalXP
+      }
+    },
+    { upsert: true }
+  );
+
   return {
     xpAdded: xpAmount,
-    newLevel: newLevel,
-    oldLevel: oldLevel,
+    newLevel,
+    oldLevel,
     totalXP: userData.totalXP,
     leveledUp: newLevel > oldLevel
   };
 }
-
 // Get user level info
 async function getUserLevelInfo(guildId, userId) {
-  const levels = await loadLevels();
-  if (!levels[guildId] || !levels[guildId][userId]) {
-    return { level: 1, totalXP: 0, xpForNextLevel: getXPForLevel(2) };
+  const userData = await levelsCollection.findOne({ guildId, userId });
+
+  if (!userData) {
+    return {
+      level: 1,
+      totalXP: 0,
+      xpForNextLevel: getXPForLevel(2)
+    };
   }
-  
-  const userData = levels[guildId][userId];
+
   const xpNeededForCurrentLevel = getTotalXPForLevel(userData.level);
   const xpNeededForNextLevel = getTotalXPForLevel(userData.level + 1);
-  const xpInCurrentLevel = userData.totalXP - xpNeededForCurrentLevel;
-  const xpNeededForThisLevel = xpNeededForNextLevel - xpNeededForCurrentLevel;
-  
+
+  const xpInCurrentLevel =
+    userData.totalXP - xpNeededForCurrentLevel;
+
+  const xpNeededForThisLevel =
+    xpNeededForNextLevel - xpNeededForCurrentLevel;
+
   return {
     level: userData.level,
     totalXP: userData.totalXP,
-    xpInCurrentLevel: xpInCurrentLevel,
-    xpNeededForThisLevel: xpNeededForThisLevel,
+    xpInCurrentLevel,
+    xpNeededForThisLevel,
     xpForNextLevel: xpNeededForNextLevel
   };
 }
-
 // Get leaderboard
 async function getLeaderboard(guildId, limit = 10) {
-  const levels = await loadLevels();
-  if (!levels[guildId]) return [];
-  
-  const users = Object.entries(levels[guildId])
-    .map(([userId, data]) => ({
-      userId,
-      level: data.level,
-      totalXP: data.totalXP
-    }))
-    .sort((a, b) => {
-      if (b.level !== a.level) return b.level - a.level;
-      return b.totalXP - a.totalXP;
-    })
-    .slice(0, limit);
-  
-  return users;
+  return await levelsCollection
+    .find({ guildId })
+    .sort({ level: -1, totalXP: -1 })
+    .limit(limit)
+    .toArray();
 }
-
 // === Discord client ===
 const client = new Client({
   intents: [
@@ -167,32 +171,19 @@ app.listen(process.env.PORT || 3000, () =>
   console.log("🌐 Keep-alive web server running")
 );
 
-// === Warnings persistence (simple JSON file) ===
-const WARN_FILE = path.resolve("./warnings.json");
-async function loadWarnings() {
-  try {
-    const raw = await fs.readFile(WARN_FILE, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return {};
-  }
-}
-
-async function saveWarnings(obj) {
-  await fs.writeFile(WARN_FILE, JSON.stringify(obj, null, 2), "utf8");
-}
-
 // Send mod action DM to user
-async function sendModActionDM(client, userId, action, reason, duration = null) {
+async function sendModActionDM(client, guildName, userId, action, reason, duration = null) {
   try {
     const user = await client.users.fetch(userId);
-    let message = `📋 **${action}**\n\nReason: ${reason || "No reason provided"}`;
+    let message =`📋 **${action}**🏠 Server: ${guildName}📝 Reason: ${reason || "No reason provided"}`;
     if (duration) {
       message += `\nDuration: ${duration}`;
     }
     await user.send(message);
   } catch (err) {
-    console.error(`Failed to send DM to ${userId}:`, err);
+    if (err.code !== 50007 && err.code !== 50278) {
+      console.error(`Failed to send DM to ${userId}:`, err);
+    }
   }
 }
 
@@ -321,9 +312,6 @@ function shouldReply(message) {
   // For GROUP SERVER: AI only in specific channel
   if (message.guild?.id === GROUP_SERVER_ID) {
     if (message.channel.id !== GROUP_AI_CHANNEL_ID) {
-      message.reply(
-        `❌ AI commands only work in <#${GROUP_AI_CHANNEL_ID}>`
-      ).catch(() => {});
       return false;
     }
   }
@@ -557,12 +545,13 @@ client.on("interactionCreate", async interaction => {
       if (!member) return interaction.reply({ content: "Member not found.", flags: 64 });
       if (!member.kickable) return interaction.reply({ content: "I cannot kick that user.", flags: 64 });
       
+      // Send DM BEFORE kick
+      await sendModActionDM(client,interaction.guild.name,target.id,"Kicked from server",reason);
+
       await member.kick(reason);
+
       await interaction.reply(`✅ Kicked ${target.tag} — ${reason}`);
       await sendLog(client, `🔨 ${interaction.user.tag} kicked ${target.tag} — ${reason}`);
-      
-      // Send DM to user
-      await sendModActionDM(client, target.id, "Kicked from server", reason);
       
       // Send public mod message (GROUP SERVER ONLY)
       if (interaction.guild.id === GROUP_SERVER_ID) {
@@ -578,12 +567,13 @@ client.on("interactionCreate", async interaction => {
       const target = interaction.options.getUser("target");
       const reason = interaction.options.getString("reason") || "No reason provided";
       
+      // Send DM BEFORE ban
+      await sendModActionDM(client,interaction.guild.name,target.id,"Banned from server",reason);
+
       await interaction.guild.members.ban(target.id, { reason }).catch(err => { throw err; });
+
       await interaction.reply({ content: `✅ Banned ${target.tag}`, flags: 64 });
       await sendLog(client, `🔨 ${interaction.user.tag} banned ${target.tag} — ${reason}`);
-      
-      // Send DM to user
-      await sendModActionDM(client, target.id, "Banned from server", reason);
       
       // Send public mod message (GROUP SERVER ONLY)
       if (interaction.guild.id === GROUP_SERVER_ID) {
@@ -605,7 +595,7 @@ client.on("interactionCreate", async interaction => {
         await sendLog(client, `♻️ ${interaction.user.tag} unbanned ${userId}`);
         
         // Send DM to user
-        await sendModActionDM(client, userId, "Unbanned from server", "Appeal approved");
+        await sendModActionDM(client,interaction.guild.name,target.id,"Unbanned from server",reason);
         
         // Send public mod message (GROUP SERVER ONLY)
         if (interaction.guild.id === GROUP_SERVER_ID) {
@@ -637,7 +627,7 @@ client.on("interactionCreate", async interaction => {
       await interaction.reply(`🔇 ${target.tag} muted for ${minutes} minute(s).`);
       
       // Send DM to user
-      await sendModActionDM(client, target.id, "Muted on server", "Timeout applied", `${minutes} minute(s)`);
+      await sendModActionDM(client, interaction.guild.name, target.id, "Muted on server", "Timeout applied", `${minutes} minute(s)`);
       
       // Send public mod message (GROUP SERVER ONLY)
       if (interaction.guild.id === GROUP_SERVER_ID) {
@@ -670,7 +660,7 @@ client.on("interactionCreate", async interaction => {
       await sendLog(client, `🔊 ${interaction.user.tag} unmuted ${target.tag}`);
       
       // Send DM to user
-      await sendModActionDM(client, target.id, "Unmuted on server", "Timeout removed");
+      await sendModActionDM(client,interaction.guild.name,target.id,"Unmuted from server",reason);
       
       // Send public mod message (GROUP SERVER ONLY)
       if (interaction.guild.id === GROUP_SERVER_ID) {
@@ -692,27 +682,23 @@ client.on("interactionCreate", async interaction => {
       }
       const target = interaction.options.getUser("target");
       const reason = interaction.options.getString("reason") || "No reason provided";
-      const warns = await loadWarnings();
-      if (!warns[interaction.guild.id]) warns[interaction.guild.id] = {};
-      if (!warns[interaction.guild.id][target.id]) warns[interaction.guild.id][target.id] = [];
-      warns[interaction.guild.id][target.id].push({ 
-        moderator: interaction.user.tag, 
-        reason, 
-        time: new Date().toISOString() 
+      await warningsCollection.insertOne({
+        guildId: interaction.guild.id,
+        userId: target.id,
+        moderator: interaction.user.tag,
+        reason,
+        time: new Date().toISOString()
       });
-      await saveWarnings(warns);
       await interaction.reply(`⚠️ Warned ${target.tag}: ${reason}`);
       await sendLog(client, `⚠️ ${interaction.user.tag} warned ${target.tag}: ${reason}`);
       
       // Send DM to user
-      await sendModActionDM(client, target.id, "Warning on server", reason);
-    }
+      await sendModActionDM(client, interaction.guild.name, target.id, "Warning on server", reason);}
 
     // warnings
     if (cmd === "warnings") {
       const target = interaction.options.getUser("user") || interaction.user;
-      const warns = await loadWarnings();
-      const list = (warns[interaction.guild.id] && warns[interaction.guild.id][target.id]) || [];
+      const list = await warningsCollection.find({guildId: interaction.guild.id,userId: target.id}).toArray();
       if (list.length === 0) {
         return interaction.reply({ content: `${target.tag} has no warnings.`, flags: 64 });
       }
