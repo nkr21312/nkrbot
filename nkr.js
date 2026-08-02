@@ -20,7 +20,8 @@ import express from "express";
 
 // === Config / tokens ===
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+// const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY; // No credit on free plan, switched to Groq
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL_ID; // optional, set in Render
 
 // ===== SERVER CONFIGURATION (IMPORTANT) =====
@@ -171,15 +172,26 @@ app.listen(process.env.PORT || 3000, () =>
   console.log("🌐 Keep-alive web server running")
 );
 
-// Send mod action DM to user
+// Send mod action DM to user (now as an embed)
 async function sendModActionDM(client, guildName, userId, action, reason, duration = null) {
   try {
     const user = await client.users.fetch(userId);
-    let message =`📋 **${action}**🏠 Server: ${guildName}📝 Reason: ${reason || "No reason provided"}`;
+
+    const embed = {
+      color: 0x5865f2,
+      title: `📋 ${action}`,
+      fields: [
+        { name: "🏠 Server", value: guildName, inline: true },
+        { name: "📝 Reason", value: reason || "No reason provided", inline: true }
+      ],
+      timestamp: new Date()
+    };
+
     if (duration) {
-      message += `\nDuration: ${duration}`;
+      embed.fields.push({ name: "⏱ Duration", value: duration, inline: true });
     }
-    await user.send(message);
+
+    await user.send({ embeds: [embed] });
   } catch (err) {
     if (err.code !== 50007 && err.code !== 50278) {
       console.error(`Failed to send DM to ${userId}:`, err);
@@ -257,16 +269,16 @@ async function sendLog(client, content) {
   }
 }
 
-// === Helper: AI call (OpenRouter) ===
-async function callOpenRouter(userId, userText) {
-  if (!OPENROUTER_API_KEY) throw new Error("Missing OpenRouter key");
+// === Helper: AI call (Groq) ===
+async function callGroq(userId, userText) {
+  if (!GROQ_API_KEY) throw new Error("Missing Groq key");
   if (!memory.has(userId)) memory.set(userId, []);
   const convo = memory.get(userId);
   convo.push({ role: "user", content: userText });
   if (convo.length > 10) convo.splice(0, convo.length - 10);
 
   const body = {
-    model: "openai/gpt-4o-mini",
+    model: "llama-3.3-70b-versatile", // Groq's flagship free-tier model
     messages: [
       { role: "system", content: "You are a friendly Discord assistant. Keep answers concise." },
       ...convo
@@ -274,10 +286,10 @@ async function callOpenRouter(userId, userText) {
     max_tokens: 500
   };
 
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      Authorization: `Bearer ${GROQ_API_KEY}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body)
@@ -285,7 +297,8 @@ async function callOpenRouter(userId, userText) {
 
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    throw new Error(`OpenRouter error ${res.status}: ${txt}`);
+    console.error("Groq API error:", res.status, txt);
+    return "⚠️ I'm having trouble reaching the AI service right now. Try again in a bit!";
   }
   const data = await res.json();
   const reply = data?.choices?.[0]?.message?.content?.trim() || "I couldn't think of a reply.";
@@ -449,7 +462,7 @@ client.on("interactionCreate", async interaction => {
     if (cmd === "ask") {
       const question = interaction.options.getString("question");
       await interaction.deferReply();
-      const reply = await callOpenRouter(interaction.user.id, question);
+      const reply = await callGroq(interaction.user.id, question);
       await interaction.editReply(reply.slice(0, 2000));
       await sendLog(client, `💬 /ask by ${interaction.user.tag}: ${question}`);
     }
@@ -546,7 +559,7 @@ client.on("interactionCreate", async interaction => {
       if (!member.kickable) return interaction.reply({ content: "I cannot kick that user.", flags: 64 });
       
       // Send DM BEFORE kick
-      await sendModActionDM(client,interaction.guild.name,target.id,"Kicked from server",reason);
+      await sendModActionDM(client, interaction.guild.name, target.id, "Kicked from server", reason);
 
       await member.kick(reason);
 
@@ -568,7 +581,7 @@ client.on("interactionCreate", async interaction => {
       const reason = interaction.options.getString("reason") || "No reason provided";
       
       // Send DM BEFORE ban
-      await sendModActionDM(client,interaction.guild.name,target.id,"Banned from server",reason);
+      await sendModActionDM(client, interaction.guild.name, target.id, "Banned from server", reason);
 
       await interaction.guild.members.ban(target.id, { reason }).catch(err => { throw err; });
 
@@ -594,8 +607,8 @@ client.on("interactionCreate", async interaction => {
         await interaction.reply(`✅ Unbanned user with ID ${userId}`);
         await sendLog(client, `♻️ ${interaction.user.tag} unbanned ${userId}`);
         
-        // Send DM to user
-        await sendModActionDM(client,interaction.guild.name,target.id,"Unbanned from server",reason);
+        // Send DM to user (fixed: was referencing undefined target/reason)
+        await sendModActionDM(client, interaction.guild.name, userId, "Unbanned from server", "Unban");
         
         // Send public mod message (GROUP SERVER ONLY)
         if (interaction.guild.id === GROUP_SERVER_ID) {
@@ -659,8 +672,8 @@ client.on("interactionCreate", async interaction => {
       await interaction.reply(`🔊 ${target.tag} has been unmuted.`);
       await sendLog(client, `🔊 ${interaction.user.tag} unmuted ${target.tag}`);
       
-      // Send DM to user
-      await sendModActionDM(client,interaction.guild.name,target.id,"Unmuted from server",reason);
+      // Send DM to user (fixed: was referencing undefined reason)
+      await sendModActionDM(client, interaction.guild.name, target.id, "Unmuted from server", "Timeout removed");
       
       // Send public mod message (GROUP SERVER ONLY)
       if (interaction.guild.id === GROUP_SERVER_ID) {
@@ -693,7 +706,8 @@ client.on("interactionCreate", async interaction => {
       await sendLog(client, `⚠️ ${interaction.user.tag} warned ${target.tag}: ${reason}`);
       
       // Send DM to user
-      await sendModActionDM(client, interaction.guild.name, target.id, "Warning on server", reason);}
+      await sendModActionDM(client, interaction.guild.name, target.id, "Warning on server", reason);
+    }
 
     // warnings
     if (cmd === "warnings") {
@@ -752,7 +766,7 @@ client.on("messageCreate", async message => {
     
     const text = extractUserText(message);
     await message.channel.sendTyping();
-    const reply = await callOpenRouter(message.author.id, text);
+    const reply = await callGroq(message.author.id, text);
     await sendLog(client, `💭 ${message.author.tag}: ${text}`);
     
     if (reply.length <= 2000) return message.reply(reply);
