@@ -760,6 +760,9 @@ client.on("interactionCreate", async interaction => {
 
       // Send DM to user
       await sendModActionDM(client, interaction.guild.name, target.id, "Warning on server", reason);
+
+      // Send global mod message to THIS server's configured channel
+      await sendPublicModMessage(client, interaction.guild.id, "User Warned", target, interaction.user, reason, { color: 0xFFA500 });
     }
 
     // warnings
