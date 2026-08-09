@@ -11,7 +11,8 @@ import {
   SlashCommandBuilder,
   REST,
   Routes,
-  PermissionFlagsBits
+  PermissionFlagsBits,
+  ChannelType
 } from "discord.js";
 import fetch from "node-fetch";
 import express from "express";
@@ -30,7 +31,6 @@ const NKR_SERVER_ID = "1255904591875280997";
 
 // Group Server (where XP and restricted AI work)
 const GROUP_SERVER_ID = "1155780893311520788";
-const GROUP_GENERAL_CHANNEL_ID = process.env.GENERAL_CHANNEL_ID; // for public mod messages
 const GROUP_LEVEL_UP_CHANNEL_ID = process.env.LEVEL_UP_CHANNEL_ID; // for level-up announcements
 const GROUP_AI_CHANNEL_ID = "1169991875709636628"; // ONLY channel where AI works in Group server
 
@@ -48,6 +48,8 @@ const db = mongoClient.db("nkrbot");
 
 const levelsCollection = db.collection("levels");
 const warningsCollection = db.collection("warnings");
+// NEW: per-guild config (e.g. where global mod messages should be posted)
+const guildConfigCollection = db.collection("guildConfig");
 
 // === Leveling System Config (GROUP SERVER ONLY) ===
 const XP_PER_MESSAGE = 10; // Base XP per message
@@ -152,6 +154,30 @@ async function getLeaderboard(guildId, limit = 10) {
     .limit(limit)
     .toArray();
 }
+
+// ===== NEW: Per-guild mod-log channel config =====
+// Simple in-memory cache so we don't hit Mongo on every single mod action
+const modLogChannelCache = new Map();
+
+async function setModLogChannel(guildId, channelId) {
+  await guildConfigCollection.updateOne(
+    { guildId },
+    { $set: { guildId, modLogChannelId: channelId } },
+    { upsert: true }
+  );
+  modLogChannelCache.set(guildId, channelId);
+}
+
+async function getModLogChannelId(guildId) {
+  if (modLogChannelCache.has(guildId)) {
+    return modLogChannelCache.get(guildId);
+  }
+  const doc = await guildConfigCollection.findOne({ guildId });
+  const channelId = doc?.modLogChannelId || null;
+  modLogChannelCache.set(guildId, channelId);
+  return channelId;
+}
+
 // === Discord client ===
 const client = new Client({
   intents: [
@@ -199,10 +225,15 @@ async function sendModActionDM(client, guildName, userId, action, reason, durati
   }
 }
 
-// Send public mod message to general channel (GROUP SERVER ONLY)
-async function sendPublicModMessage(client, action, target, moderator, reason, extra = {}) {
+// Send global/public mod message to THIS guild's configured mod-log channel.
+// Works for any server that has run /setmodlog — no longer hardcoded to one server.
+async function sendPublicModMessage(client, guildId, action, target, moderator, reason, extra = {}) {
   try {
-    if (!GROUP_GENERAL_CHANNEL_ID) return;
+    const channelId = await getModLogChannelId(guildId);
+    if (!channelId) return; // this server hasn't set a mod-log channel yet
+
+    const channel = await client.channels.fetch(channelId).catch(() => null);
+    if (!channel || !channel.isTextBased()) return;
 
     const embed = {
       color: extra.color || 0xff0000,
@@ -219,12 +250,9 @@ async function sendPublicModMessage(client, action, target, moderator, reason, e
       embed.fields.push({ name: "⏱ Duration", value: extra.duration });
     }
 
-    const channel = await client.channels.fetch(GROUP_GENERAL_CHANNEL_ID);
-    if (channel && channel.isTextBased()) {
-      await channel.send({ embeds: [embed] });
-    }
+    await channel.send({ embeds: [embed] });
   } catch (err) {
-    console.error("Failed to send to general:", err);
+    console.error("Failed to send public mod message:", err);
   }
 }
 
@@ -352,7 +380,7 @@ const commands = [
     .addStringOption(o => o.setName("question").setDescription("Your question").setRequired(true)),
   new SlashCommandBuilder().setName("help").setDescription("Show help menu"),
   new SlashCommandBuilder().setName("donate").setDescription("Support the bot"),
-  
+
   // ===== LEVELING COMMANDS (GROUP SERVER ONLY) =====
   new SlashCommandBuilder()
     .setName("level")
@@ -361,7 +389,7 @@ const commands = [
   new SlashCommandBuilder()
     .setName("leaderboard")
     .setDescription("Show top 10 users by level"),
-  
+
   // ===== MODERATION COMMANDS (GLOBAL - all servers) =====
   new SlashCommandBuilder()
     .setName("kick")
@@ -398,22 +426,34 @@ const commands = [
   new SlashCommandBuilder()
     .setName("clear")
     .setDescription("Clear messages")
-    .addIntegerOption(o => o.setName("amount").setDescription("Number of messages").setRequired(true))
+    .addIntegerOption(o => o.setName("amount").setDescription("Number of messages").setRequired(true)),
+
+  // ===== NEW: set the channel for global mod messages (per server) =====
+  new SlashCommandBuilder()
+    .setName("setmodlog")
+    .setDescription("Set the channel where global mod action messages are posted (this server only)")
+    .addChannelOption(o =>
+      o.setName("channel")
+        .setDescription("The text channel to post mod actions in")
+        .addChannelTypes(ChannelType.GuildText)
+        .setRequired(true)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
 ];
 
 // === Register slash commands ===
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   const rest = new REST().setToken(DISCORD_BOT_TOKEN);
-  
+
   try {
     // Separate leveling commands (guild-based, GROUP SERVER ONLY)
-    const levelingCommands = commands.filter(cmd => 
+    const levelingCommands = commands.filter(cmd =>
       ["level", "leaderboard"].includes(cmd.name)
     ).map(cmd => cmd.toJSON());
 
     // All other commands (global)
-    const otherCommands = commands.filter(cmd => 
+    const otherCommands = commands.filter(cmd =>
       !["level", "leaderboard"].includes(cmd.name)
     ).map(cmd => cmd.toJSON());
 
@@ -426,7 +466,7 @@ client.once("ready", async () => {
       console.log("✅ Leveling commands registered to GROUP SERVER!");
     }
 
-    // Register global commands (moderation + AI)
+    // Register global commands (moderation + AI + setmodlog)
     await rest.put(
       Routes.applicationCommands(client.user.id),
       { body: otherCommands }
@@ -470,10 +510,10 @@ client.on("interactionCreate", async interaction => {
     // help
     if (cmd === "help") {
       await interaction.reply({
-        embeds: [{ 
-          title: "NKR.bot Help", 
-          description: "**/ask** • Ask the AI\n**/donate** • Support\n**/level** • Check your level (Group Server)\n**/leaderboard** • See top users (Group Server)\n\n**Moderation:** /kick /ban /mute /warn /warnings /clear", 
-          color: 0x5865f2 
+        embeds: [{
+          title: "NKR.bot Help",
+          description: "**/ask** • Ask the AI\n**/donate** • Support\n**/level** • Check your level (Group Server)\n**/leaderboard** • See top users (Group Server)\n**/setmodlog** • Set this server's mod-log channel (Manage Server)\n\n**Moderation:** /kick /ban /mute /warn /warnings /clear",
+          color: 0x5865f2
         }],
         ephemeral: true
       });
@@ -484,8 +524,28 @@ client.on("interactionCreate", async interaction => {
       await interaction.reply({ content: "Support: https://ko-fi.com/yourlink", flags: 64 });
     }
 
+    // ===== NEW: setmodlog =====
+    if (cmd === "setmodlog") {
+      // setDefaultMemberPermissions already restricts this at the Discord UI level,
+      // but we double-check server-side in case permissions were overridden.
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.ManageGuild)) {
+        return interaction.reply({ content: "❌ You need the Manage Server permission to use this.", flags: 64 });
+      }
+
+      const channel = interaction.options.getChannel("channel");
+
+      if (!channel || channel.type !== ChannelType.GuildText) {
+        return interaction.reply({ content: "❌ Please choose a text channel.", flags: 64 });
+      }
+
+      await setModLogChannel(interaction.guild.id, channel.id);
+
+      await interaction.reply({ content: `✅ Global mod action messages will now be posted in <#${channel.id}> for this server.`, flags: 64 });
+      await sendLog(client, `⚙️ ${interaction.user.tag} set mod-log channel for ${interaction.guild.name} to #${channel.name}`);
+    }
+
     // ===== LEVELING COMMANDS (GROUP SERVER ONLY) =====
-    
+
     // level - Check user level
     if (cmd === "level") {
       if (interaction.guild.id !== GROUP_SERVER_ID) {
@@ -494,12 +554,12 @@ client.on("interactionCreate", async interaction => {
 
       const user = interaction.options.getUser("user") || interaction.user;
       const levelInfo = await getUserLevelInfo(interaction.guild.id, user.id);
-      
+
       const progressPercent = Math.round(
         (levelInfo.xpInCurrentLevel / levelInfo.xpNeededForThisLevel) * 100
       );
       const progressBar = "█".repeat(Math.floor(progressPercent / 5)) + "░".repeat(20 - Math.floor(progressPercent / 5));
-      
+
       const embed = {
         color: 0x5865f2,
         title: `📊 ${user.username}'s Level Info`,
@@ -512,7 +572,7 @@ client.on("interactionCreate", async interaction => {
           { name: "📍 XP to Next Level", value: `${levelInfo.xpNeededForThisLevel - levelInfo.xpInCurrentLevel}`, inline: true }
         ]
       };
-      
+
       await interaction.reply({ embeds: [embed] });
     }
 
@@ -523,25 +583,25 @@ client.on("interactionCreate", async interaction => {
       }
 
       const users = await getLeaderboard(interaction.guild.id, 10);
-      
+
       if (users.length === 0) {
         return interaction.reply({ content: "No users have leveled up yet!", flags: 64 });
       }
-      
+
       let description = "";
       for (let i = 0; i < users.length; i++) {
         const user = await client.users.fetch(users[i].userId).catch(() => null);
         const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `#${i + 1}`;
         description += `${medal} <@${users[i].userId}> - Level **${users[i].level}** (${users[i].totalXP} XP)\n`;
       }
-      
+
       const embed = {
         color: 0xFFD700,
         title: "🏆 Leaderboard",
         description: description,
         footer: { text: "Top 10 Most Active Users" }
       };
-      
+
       await interaction.reply({ embeds: [embed] });
     }
 
@@ -557,7 +617,7 @@ client.on("interactionCreate", async interaction => {
       const member = await interaction.guild.members.fetch(target.id).catch(() => null);
       if (!member) return interaction.reply({ content: "Member not found.", flags: 64 });
       if (!member.kickable) return interaction.reply({ content: "I cannot kick that user.", flags: 64 });
-      
+
       // Send DM BEFORE kick
       await sendModActionDM(client, interaction.guild.name, target.id, "Kicked from server", reason);
 
@@ -565,11 +625,9 @@ client.on("interactionCreate", async interaction => {
 
       await interaction.reply(`✅ Kicked ${target.tag} — ${reason}`);
       await sendLog(client, `🔨 ${interaction.user.tag} kicked ${target.tag} — ${reason}`);
-      
-      // Send public mod message (GROUP SERVER ONLY)
-      if (interaction.guild.id === GROUP_SERVER_ID) {
-        await sendPublicModMessage(client, "User Kicked", target, interaction.user, reason, { color: 0xFFA500 });
-      }
+
+      // Send global mod message to THIS server's configured channel
+      await sendPublicModMessage(client, interaction.guild.id, "User Kicked", target, interaction.user, reason, { color: 0xFFA500 });
     }
 
     // ban
@@ -579,7 +637,7 @@ client.on("interactionCreate", async interaction => {
       }
       const target = interaction.options.getUser("target");
       const reason = interaction.options.getString("reason") || "No reason provided";
-      
+
       // Send DM BEFORE ban
       await sendModActionDM(client, interaction.guild.name, target.id, "Banned from server", reason);
 
@@ -587,11 +645,9 @@ client.on("interactionCreate", async interaction => {
 
       await interaction.reply({ content: `✅ Banned ${target.tag}`, flags: 64 });
       await sendLog(client, `🔨 ${interaction.user.tag} banned ${target.tag} — ${reason}`);
-      
-      // Send public mod message (GROUP SERVER ONLY)
-      if (interaction.guild.id === GROUP_SERVER_ID) {
-        await sendPublicModMessage(client, "User Banned", target, interaction.user, reason, { color: 0xff0000 });
-      }
+
+      // Send global mod message to THIS server's configured channel
+      await sendPublicModMessage(client, interaction.guild.id, "User Banned", target, interaction.user, reason, { color: 0xff0000 });
     }
 
     // unban
@@ -606,21 +662,20 @@ client.on("interactionCreate", async interaction => {
         await interaction.guild.members.unban(userId);
         await interaction.reply(`✅ Unbanned user with ID ${userId}`);
         await sendLog(client, `♻️ ${interaction.user.tag} unbanned ${userId}`);
-        
+
         // Send DM to user (fixed: was referencing undefined target/reason)
         await sendModActionDM(client, interaction.guild.name, userId, "Unbanned from server", "Unban");
-        
-        // Send public mod message (GROUP SERVER ONLY)
-        if (interaction.guild.id === GROUP_SERVER_ID) {
-          await sendPublicModMessage(
-            client,
-            "User Unbanned",
-            { id: userId, tag: `ID:${userId}` },
-            interaction.user,
-            "Unban",
-            { color: 0x2ECC71 }
-          );
-        }
+
+        // Send global mod message to THIS server's configured channel
+        await sendPublicModMessage(
+          client,
+          interaction.guild.id,
+          "User Unbanned",
+          { id: userId, tag: `ID:${userId}` },
+          interaction.user,
+          "Unban",
+          { color: 0x2ECC71 }
+        );
       } catch (err) {
         await interaction.reply({ content: "Failed to unban. Check the user ID.", flags: 64 });
       }
@@ -635,24 +690,23 @@ client.on("interactionCreate", async interaction => {
       const minutes = interaction.options.getInteger("minutes");
       const member = await interaction.guild.members.fetch(target.id).catch(() => null);
       if (!member) return interaction.reply({ content: "Member not found.", flags: 64 });
-      
+
       await member.timeout(minutes * 60 * 1000, `Muted by ${interaction.user.tag}`).catch(e => { throw e; });
       await interaction.reply(`🔇 ${target.tag} muted for ${minutes} minute(s).`);
-      
+
       // Send DM to user
       await sendModActionDM(client, interaction.guild.name, target.id, "Muted on server", "Timeout applied", `${minutes} minute(s)`);
-      
-      // Send public mod message (GROUP SERVER ONLY)
-      if (interaction.guild.id === GROUP_SERVER_ID) {
-        await sendPublicModMessage(
-          client,
-          "User Muted",
-          target,
-          interaction.user,
-          "Timeout",
-          { duration: `${minutes} minute(s)`, color: 0xFFD700 }
-        );
-      }
+
+      // Send global mod message to THIS server's configured channel
+      await sendPublicModMessage(
+        client,
+        interaction.guild.id,
+        "User Muted",
+        target,
+        interaction.user,
+        "Timeout",
+        { duration: `${minutes} minute(s)`, color: 0xFFD700 }
+      );
     }
 
     // unmute (remove timeout)
@@ -671,21 +725,20 @@ client.on("interactionCreate", async interaction => {
       await member.timeout(null, `Unmuted by ${interaction.user.tag}`).catch(e => { throw e; });
       await interaction.reply(`🔊 ${target.tag} has been unmuted.`);
       await sendLog(client, `🔊 ${interaction.user.tag} unmuted ${target.tag}`);
-      
+
       // Send DM to user (fixed: was referencing undefined reason)
       await sendModActionDM(client, interaction.guild.name, target.id, "Unmuted from server", "Timeout removed");
-      
-      // Send public mod message (GROUP SERVER ONLY)
-      if (interaction.guild.id === GROUP_SERVER_ID) {
-        await sendPublicModMessage(
-          client,
-          "User Unmuted",
-          target,
-          interaction.user,
-          "Timeout removed",
-          { color: 0x2ECC71 }
-        );
-      }
+
+      // Send global mod message to THIS server's configured channel
+      await sendPublicModMessage(
+        client,
+        interaction.guild.id,
+        "User Unmuted",
+        target,
+        interaction.user,
+        "Timeout removed",
+        { color: 0x2ECC71 }
+      );
     }
 
     // warn
@@ -704,7 +757,7 @@ client.on("interactionCreate", async interaction => {
       });
       await interaction.reply(`⚠️ Warned ${target.tag}: ${reason}`);
       await sendLog(client, `⚠️ ${interaction.user.tag} warned ${target.tag}: ${reason}`);
-      
+
       // Send DM to user
       await sendModActionDM(client, interaction.guild.name, target.id, "Warning on server", reason);
     }
@@ -754,7 +807,7 @@ client.on("messageCreate", async message => {
     // ===== XP GAIN (GROUP SERVER ONLY) =====
     if (!message.author.bot && message.guild && message.guild.id === GROUP_SERVER_ID) {
       const result = await addXPToUser(message.guild.id, message.author.id);
-      
+
       // Notify user on level up
       if (result.leveledUp) {
         await sendLevelUpMessage(client, message.author.id, result.newLevel, result.totalXP, message.guild.id);
@@ -763,16 +816,16 @@ client.on("messageCreate", async message => {
 
     // ===== AI REPLY LOGIC (Works in both servers, but restricted in GROUP SERVER) =====
     if (!shouldReply(message)) return;
-    
+
     const text = extractUserText(message);
     await message.channel.sendTyping();
     const reply = await callGroq(message.author.id, text);
     await sendLog(client, `💭 ${message.author.tag}: ${text}`);
-    
+
     if (reply.length <= 2000) return message.reply(reply);
     const parts = reply.match(/[\s\S]{1,1900}/g) || [reply];
     for (const p of parts) await message.reply(p);
-    
+
   } catch (err) {
     console.error("messageCreate error:", err);
     await sendLog(client, `⚠️ messageCreate error: ${err.message}`);
