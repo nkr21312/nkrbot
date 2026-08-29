@@ -306,7 +306,7 @@ async function callGroq(userId, userText) {
   if (convo.length > 10) convo.splice(0, convo.length - 10);
 
   const body = {
-    model: "llama-3.3-70b-versatile", // Groq's flagship free-tier model
+    model: "openai/gpt-oss-120b", // Groq's flagship free-tier model
     messages: [
       { role: "system", content: "You are a friendly Discord assistant. Keep answers concise." },
       ...convo
@@ -324,10 +324,11 @@ async function callGroq(userId, userText) {
   });
 
   if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    console.error("Groq API error:", res.status, txt);
-    return "⚠️ I'm having trouble reaching the AI service right now. Try again in a bit!";
-  }
+  const txt = await res.text().catch(() => "");
+  console.error("Groq API error:", res.status, txt);
+  await sendLog(client, `⚠️ Groq API error ${res.status}: ${txt.slice(0, 500)}`);
+  return "⚠️ I'm having trouble reaching the AI service right now. Try again in a bit!";
+}
   const data = await res.json();
   const reply = data?.choices?.[0]?.message?.content?.trim() || "I couldn't think of a reply.";
   convo.push({ role: "assistant", content: reply });
