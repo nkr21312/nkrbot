@@ -79,7 +79,10 @@ main{max-width:820px;margin:28px auto;padding:0 16px}
 .card{background:#272934;border:1px solid #343746;border-radius:10px;padding:20px;margin-bottom:18px}
 h1,h2{margin-top:0}
 label{display:block;margin:12px 0 4px;font-size:14px;color:#b9bccb}
-input[type=text],input[type=password],input[type=email],select{width:100%;padding:10px;border-radius:6px;border:1px solid #444860;background:#1b1c23;color:#e8e8ee}
+input[type=text],input[type=password],input[type=email],input[type=number],select,textarea{width:100%;padding:10px;border-radius:6px;border:1px solid #444860;background:#1b1c23;color:#e8e8ee;font-family:inherit;font-size:14px}
+textarea{min-height:90px;resize:vertical}
+.hint{color:#9a9db0;font-size:12px;margin-top:4px}
+button.save{position:sticky;bottom:12px;width:100%;padding:14px;font-size:15px}
 .check{display:flex;gap:8px;align-items:center;margin:12px 0}
 button{background:#5865f2;color:#fff;border:0;border-radius:6px;padding:10px 18px;font-weight:600;cursor:pointer;margin-top:14px}
 button.danger{background:#d33f49}
@@ -98,6 +101,141 @@ function page({ title, body, user, csrf, flash }) {
     : `<span><a href="/dashboard/login">Log in</a> &nbsp; <a href="/dashboard/register">Register</a></span>`;
   const flashHtml = flash ? `<div class="${flash.type === "ok" ? "ok" : "err"}">${esc(flash.msg)}</div>` : "";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)} · NKR.bot</title><style>${CSS}</style></head><body><header><a href="/dashboard">🧠 NKR.bot Dashboard</a>${nav}</header><main>${flashHtml}${body}</main></body></html>`;
+}
+
+
+// ============================================================
+// Settings schema — ONE source of truth for the form, validation AND bot defaults
+// ============================================================
+const WELCOME_DEFAULT = "Welcome {user} to **{server}**! You are member #{count}.";
+const LEAVE_DEFAULT = "**{username}** has left {server}.";
+const AI_DEFAULT = "You are a friendly Discord assistant. Keep answers concise.";
+
+export const SETTINGS_SCHEMA = [
+  {
+    title: "🛡 Moderation",
+    fields: [
+      { key: "modLogChannelId", type: "channel", def: null, label: "Mod-log channel", help: "Where kicks, bans, softbans, mutes and warnings are posted." },
+      { key: "dmOnAction", type: "bool", def: true, label: "DM members when they are warned / muted / kicked / banned" },
+      { key: "softbanDeleteDays", type: "int", min: 0, max: 7, def: 1, label: "Softban: delete messages from the last N days", help: "Used when /softban is run without a number." },
+      { key: "warnThreshold", type: "int", min: 0, max: 20, def: 0, label: "Auto-punish after this many warnings (0 = off)", help: "Triggers at every multiple, e.g. 3 = at 3, 6, 9 warnings." },
+      { key: "warnAction", type: "select", def: "mute", label: "Auto-punishment", options: [{ value: "mute", label: "Mute (timeout)" }, { value: "kick", label: "Kick" }, { value: "ban", label: "Ban" }] },
+      { key: "warnMuteMinutes", type: "int", min: 1, max: 40320, def: 60, label: "Auto-mute length (minutes)", help: "Only used when the auto-punishment is Mute. Max 28 days." }
+    ]
+  },
+  {
+    title: "👋 Welcome & leave",
+    help: "Placeholders: {user} (mention), {username}, {server}, {count} (member count).",
+    fields: [
+      { key: "welcomeEnabled", type: "bool", def: false, label: "Send a welcome message when someone joins" },
+      { key: "welcomeChannelId", type: "channel", def: null, label: "Welcome channel" },
+      { key: "welcomeMessage", type: "textarea", def: WELCOME_DEFAULT, maxLen: 500, label: "Welcome message" },
+      { key: "autoRoleId", type: "role", def: null, label: "Auto-role for new members", help: "The bot's own role must be ABOVE this role in Server Settings → Roles." },
+      { key: "leaveEnabled", type: "bool", def: false, label: "Send a message when someone leaves" },
+      { key: "leaveChannelId", type: "channel", def: null, label: "Leave channel" },
+      { key: "leaveMessage", type: "textarea", def: LEAVE_DEFAULT, maxLen: 500, label: "Leave message" }
+    ]
+  },
+  {
+    title: "🚫 Auto-moderation",
+    help: "Messages are deleted automatically. Members with Manage Messages or Administrator are exempt. The bot needs Manage Messages.",
+    fields: [
+      { key: "automodBlockInvites", type: "bool", def: false, label: "Delete Discord invite links" },
+      { key: "automodBlockLinks", type: "bool", def: false, label: "Delete all links (includes invites)" },
+      { key: "automodBlockedWords", type: "textarea", def: "", maxLen: 1000, label: "Blocked words", help: "Separate with commas or new lines. Whole words only, not case-sensitive." }
+    ]
+  },
+  {
+    title: "🤖 AI",
+    fields: [
+      { key: "aiEnabled", type: "bool", def: true, label: "AI replies enabled (! prefix, mentions, /ask)" },
+      { key: "aiChannelId", type: "channel", def: null, label: "Only reply in this channel", help: "Leave empty to allow AI in every channel. DMs always work." },
+      { key: "aiPersonality", type: "textarea", def: AI_DEFAULT, maxLen: 500, label: "AI personality / instructions" }
+    ]
+  },
+  {
+    title: "⭐ XP & levels",
+    fields: [
+      { key: "xpEnabled", type: "bool", def: false, label: "XP / leveling enabled", help: "Also enables /level and /leaderboard in this server." },
+      { key: "xpPerMessage", type: "int", min: 1, max: 100, def: 10, label: "XP per message" },
+      { key: "xpCooldownSeconds", type: "int", min: 0, max: 600, def: 0, label: "XP cooldown per member (seconds, 0 = none)", help: "A cooldown stops people farming XP by spamming." },
+      { key: "levelUpChannelId", type: "channel", def: null, label: "Level-up announcement channel" }
+    ]
+  }
+];
+
+export const SETTINGS_DEFAULTS = Object.fromEntries(
+  SETTINGS_SCHEMA.flatMap(s => s.fields).map(f => [f.key, f.def])
+);
+
+// Validates form input against the schema — never trusts the browser.
+export function sanitizeSettings(body, guild) {
+  const out = {};
+  for (const f of SETTINGS_SCHEMA.flatMap(s => s.fields)) {
+    const raw = body[f.key];
+    switch (f.type) {
+      case "bool":
+        out[f.key] = raw === "1";
+        break;
+      case "int": {
+        const n = parseInt(raw, 10);
+        out[f.key] = Number.isInteger(n) ? Math.min(f.max, Math.max(f.min, n)) : f.def;
+        break;
+      }
+      case "select":
+        out[f.key] = f.options.some(o => o.value === String(raw)) ? String(raw) : f.def;
+        break;
+      case "channel": {
+        const ch = raw ? guild.channels.cache.get(String(raw)) : null;
+        out[f.key] = ch && ch.type === ChannelType.GuildText ? ch.id : null;
+        break;
+      }
+      case "role": {
+        const r = raw ? guild.roles.cache.get(String(raw)) : null;
+        out[f.key] = r && r.id !== guild.id && !r.managed ? r.id : null;
+        break;
+      }
+      default: {
+        const t = String(raw ?? "").replace(/\r\n/g, "\n").trim().slice(0, f.maxLen || 200);
+        out[f.key] = t || f.def || "";
+      }
+    }
+  }
+  return out;
+}
+
+export function renderField(f, cfg, guild) {
+  const v = cfg[f.key] ?? f.def;
+  const id = `f_${f.key}`;
+  const hint = f.help ? `<div class="hint">${esc(f.help)}</div>` : "";
+  switch (f.type) {
+    case "bool":
+      return `<div class="check"><input type="checkbox" id="${id}" name="${f.key}" value="1"${v ? " checked" : ""}><label for="${id}" style="margin:0">${esc(f.label)}</label></div>${hint}`;
+    case "int":
+      return `<label for="${id}">${esc(f.label)}</label><input type="number" id="${id}" name="${f.key}" min="${f.min}" max="${f.max}" value="${esc(v)}">${hint}`;
+    case "select":
+      return `<label for="${id}">${esc(f.label)}</label><select id="${id}" name="${f.key}">${f.options.map(o => `<option value="${esc(o.value)}"${o.value === v ? " selected" : ""}>${esc(o.label)}</option>`).join("")}</select>${hint}`;
+    case "channel": {
+      const opts = guild.channels.cache
+        .filter(c => c.type === ChannelType.GuildText)
+        .sort((a, b) => a.rawPosition - b.rawPosition)
+        .map(c => `<option value="${esc(c.id)}"${c.id === v ? " selected" : ""}>#${esc(c.name)}</option>`)
+        .join("");
+      return `<label for="${id}">${esc(f.label)}</label><select id="${id}" name="${f.key}"><option value="">— none —</option>${opts}</select>${hint}`;
+    }
+    case "role": {
+      const opts = guild.roles.cache
+        .filter(r => r.id !== guild.id && !r.managed)
+        .sort((a, b) => b.position - a.position)
+        .map(r => `<option value="${esc(r.id)}"${r.id === v ? " selected" : ""}>@${esc(r.name)}</option>`)
+        .join("");
+      return `<label for="${id}">${esc(f.label)}</label><select id="${id}" name="${f.key}"><option value="">— none —</option>${opts}</select>${hint}`;
+    }
+    case "textarea":
+      return `<label for="${id}">${esc(f.label)}</label><textarea id="${id}" name="${f.key}" maxlength="${f.maxLen || 500}">${esc(v)}</textarea>${hint}`;
+    default:
+      return `<label for="${id}">${esc(f.label)}</label><input type="text" id="${id}" name="${f.key}" maxlength="${f.maxLen || 200}" value="${esc(v)}">${hint}`;
+  }
 }
 
 const csrfInput = csrf => `<input type="hidden" name="_csrf" value="${esc(csrf)}">`;
@@ -140,7 +278,7 @@ export function createDashboard({ client, db, mongoClient, getGuildConfig, setGu
       }
     })
   );
-  router.use(express.urlencoded({ extended: false, limit: "10kb" }));
+  router.use(express.urlencoded({ extended: false, limit: "40kb" }));
 
   router.use(
     session({
@@ -347,15 +485,9 @@ export function createDashboard({ client, db, mongoClient, getGuildConfig, setGu
     const guild = req.guild;
     const cfg = await getGuildConfig(guild.id);
 
-    const channels = guild.channels.cache
-      .filter(c => c.type === ChannelType.GuildText)
-      .sort((a, b) => a.rawPosition - b.rawPosition);
-    const chanOptions =
-      `<option value="">— none —</option>` +
-      channels.map(c => `<option value="${esc(c.id)}"${c.id === cfg.modLogChannelId ? " selected" : ""}>#${esc(c.name)}</option>`).join("");
-    const dayOptions = [0, 1, 2, 3, 4, 5, 6, 7]
-      .map(d => `<option value="${d}"${d === cfg.softbanDeleteDays ? " selected" : ""}>${d} day${d === 1 ? "" : "s"}</option>`)
-      .join("");
+    const sections = SETTINGS_SCHEMA.map(sec =>
+      `<div class="card"><h2>${esc(sec.title)}</h2>${sec.help ? `<p class="muted">${esc(sec.help)}</p>` : ""}${sec.fields.map(f => renderField(f, cfg, guild)).join("")}</div>`
+    ).join("");
 
     const [actions, warnCount] = await Promise.all([
       modActions.find({ guildId: guild.id }).sort({ time: -1 }).limit(15).toArray(),
@@ -368,36 +500,16 @@ export function createDashboard({ client, db, mongoClient, getGuildConfig, setGu
     const flash = req.query.saved ? { type: "ok", msg: "Settings saved." } : null;
 
     render(req, res, guild.name, `
-<div class="card"><h2>${esc(guild.name)}</h2>
-<p class="muted">${guild.memberCount} members · ${warnCount} warnings stored</p>
-<form method="post" action="/dashboard/guild/${esc(guild.id)}/settings">${csrfInput(req.session.csrf)}
-<label>Mod-log channel</label><select name="modLogChannelId">${chanOptions}</select>
-<label>Softban: delete messages from the last…</label><select name="softbanDeleteDays">${dayOptions}</select>
-<div class="check"><input type="checkbox" id="ai" name="aiEnabled" value="1"${cfg.aiEnabled ? " checked" : ""}><label for="ai" style="margin:0">AI replies enabled (! prefix, mentions, /ask)</label></div>
-<div class="check"><input type="checkbox" id="xp" name="xpEnabled" value="1"${cfg.xpEnabled ? " checked" : ""}><label for="xp" style="margin:0">XP / leveling enabled (Group Server only)</label></div>
-<button type="submit">Save settings</button></form></div>
-<div class="card"><h2>Recent mod actions</h2><table><tr><th>Action</th><th>User</th><th>Moderator</th><th>Reason</th><th>When (UTC)</th></tr>${rows}</table></div>
+<div class="card"><h2>${esc(guild.name)}</h2><p class="muted">${guild.memberCount} members · ${warnCount} warnings stored</p></div>
+<form method="post" action="/dashboard/guild/${esc(guild.id)}/settings">${csrfInput(req.session.csrf)}${sections}<button class="save" type="submit">Save all settings</button></form>
+<div class="card" style="margin-top:18px"><h2>Recent mod actions</h2><table><tr><th>Action</th><th>User</th><th>Moderator</th><th>Reason</th><th>When (UTC)</th></tr>${rows}</table></div>
 <div class="card"><h2>Unlink</h2><p class="muted">Removes this server from your web account. Run /dashboard in Discord to link again.</p>
 <form method="post" action="/dashboard/guild/${esc(guild.id)}/unlink">${csrfInput(req.session.csrf)}<button class="danger" type="submit">Unlink server</button></form></div>`, flash);
   });
 
   router.post("/guild/:id/settings", requireAuth, requireGuild, verifyCsrf, async (req, res) => {
-    const guild = req.guild;
-    const channelId = String(req.body.modLogChannelId || "");
-    const days = parseInt(req.body.softbanDeleteDays, 10);
-
-    const channel = channelId ? guild.channels.cache.get(channelId) : null;
-    if (channelId && (!channel || channel.type !== ChannelType.GuildText)) {
-      return res.status(400).send("Invalid channel");
-    }
-
-    await setGuildConfig(guild.id, {
-      modLogChannelId: channel ? channel.id : null,
-      softbanDeleteDays: Number.isInteger(days) && days >= 0 && days <= 7 ? days : 1,
-      aiEnabled: req.body.aiEnabled === "1",
-      xpEnabled: req.body.xpEnabled === "1"
-    });
-    res.redirect(`/dashboard/guild/${guild.id}?saved=1`);
+    await setGuildConfig(req.guild.id, sanitizeSettings(req.body, req.guild));
+    res.redirect(`/dashboard/guild/${req.guild.id}?saved=1`);
   });
 
   router.post("/guild/:id/unlink", requireAuth, requireGuild, verifyCsrf, async (req, res) => {

@@ -18,7 +18,7 @@ import {
 } from "discord.js";
 import fetch from "node-fetch";
 import express from "express";
-import { createDashboard, createLinkCode } from "./dashboard.js";
+import { createDashboard, createLinkCode, SETTINGS_DEFAULTS } from "./dashboard.js";
 
 // === Config / tokens ===
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -136,12 +136,8 @@ async function getLeaderboard(guildId, limit = 10) {
 }
 
 // ===== Per-guild config (shared by slash commands AND the web dashboard) =====
-const DEFAULT_GUILD_CONFIG = {
-  modLogChannelId: null,
-  softbanDeleteDays: 1,
-  aiEnabled: true,
-  xpEnabled: true
-};
+// Defaults come from the dashboard's settings schema so the website and bot never drift apart
+const DEFAULT_GUILD_CONFIG = SETTINGS_DEFAULTS;
 
 // Simple in-memory cache so we don't hit Mongo on every message / mod action
 const guildConfigCache = new Map();
@@ -149,7 +145,8 @@ const guildConfigCache = new Map();
 async function getGuildConfig(guildId) {
   if (guildConfigCache.has(guildId)) return guildConfigCache.get(guildId);
   const doc = await guildConfigCollection.findOne({ guildId });
-  const cfg = { ...DEFAULT_GUILD_CONFIG, ...(doc || {}) };
+  // XP stays on by default in the Group Server (as before); every other server opts in from the dashboard
+  const cfg = { ...DEFAULT_GUILD_CONFIG, ...(guildId === GROUP_SERVER_ID ? { xpEnabled: true } : {}), ...(doc || {}) };
   guildConfigCache.set(guildId, cfg);
   return cfg;
 }
@@ -202,8 +199,11 @@ app.listen(process.env.PORT || 3000, () =>
 );
 
 // Send mod action DM to user (now as an embed)
-async function sendModActionDM(client, guildName, userId, action, reason, duration = null) {
+async function sendModActionDM(client, guild, userId, action, reason, duration = null) {
   try {
+    const cfg = await getGuildConfig(guild.id);
+    if (!cfg.dmOnAction) return;
+    const guildName = guild.name;
     const user = await client.users.fetch(userId);
 
     const embed = {
@@ -277,9 +277,11 @@ async function sendPublicModMessage(client, guildId, action, target, moderator, 
 // Send level-up message to dedicated channel (GROUP SERVER ONLY)
 async function sendLevelUpMessage(client, userId, newLevel, totalXP, guildId) {
   try {
-    if (!GROUP_LEVEL_UP_CHANNEL_ID) return;
+    const lvCfg = await getGuildConfig(guildId);
+    const channelId = lvCfg.levelUpChannelId || (guildId === GROUP_SERVER_ID ? GROUP_LEVEL_UP_CHANNEL_ID : null);
+    if (!channelId) return;
 
-    const channel = await client.channels.fetch(GROUP_LEVEL_UP_CHANNEL_ID);
+    const channel = await client.channels.fetch(channelId);
     if (channel && channel.isTextBased()) {
       const user = await client.users.fetch(userId).catch(() => null);
 
@@ -319,7 +321,7 @@ async function sendLog(client, content) {
 }
 
 // === Helper: AI call (Groq) ===
-async function callGroq(userId, userText) {
+async function callGroq(userId, userText, systemPrompt) {
   if (!GROQ_API_KEY) throw new Error("Missing Groq key");
 
   if (!memory.has(userId)) memory.set(userId, []);
@@ -331,7 +333,7 @@ async function callGroq(userId, userText) {
   const body = {
     model: "openai/gpt-oss-120b",
     messages: [
-      { role: "system", content: "You are a friendly Discord assistant. Keep answers concise." },
+      { role: "system", content: systemPrompt || "You are a friendly Discord assistant. Keep answers concise." },
       ...convo
     ],
     max_tokens: 500
@@ -361,7 +363,7 @@ async function callGroq(userId, userText) {
 }
 
 // === Helper: message filtering ===
-function shouldReply(message) {
+function shouldReply(message, cfg) {
   if (message.author.bot) return false;
 
   // Allow DMs (works for both servers)
@@ -375,11 +377,10 @@ function shouldReply(message) {
   // Ignore normal messages
   if (!isAIMessage) return false;
 
-  // For GROUP SERVER: AI only in specific channel
-  if (message.guild?.id === GROUP_SERVER_ID) {
-    if (message.channel.id !== GROUP_AI_CHANNEL_ID) {
-      return false;
-    }
+  // Per-server AI channel from the dashboard (Group Server keeps its old fixed channel as fallback)
+  if (message.guild) {
+    const restrictTo = cfg?.aiChannelId || (message.guild.id === GROUP_SERVER_ID ? GROUP_AI_CHANNEL_ID : null);
+    if (restrictTo && message.channel.id !== restrictTo) return false;
   }
 
   // For NKR SERVER: AI works in all channels
@@ -412,11 +413,13 @@ const commands = [
   new SlashCommandBuilder()
     .setName("level")
     .setDescription("Check your level and XP")
+    .setDMPermission(false)
     .addUserOption(o => o.setName("user").setDescription("User to check (optional)")),
 
   new SlashCommandBuilder()
     .setName("leaderboard")
-    .setDescription("Show top 10 users by level"),
+    .setDescription("Show top 10 users by level")
+    .setDMPermission(false),
 
   // ===== MODERATION COMMANDS (GLOBAL - all servers) =====
   new SlashCommandBuilder()
@@ -504,27 +507,20 @@ client.once("ready", async () => {
   const rest = new REST().setToken(DISCORD_BOT_TOKEN);
 
   try {
-    // Leveling commands (guild-based, GROUP SERVER ONLY)
-    const levelingCommands = commands
-      .filter(cmd => ["level", "leaderboard"].includes(cmd.name))
-      .map(cmd => cmd.toJSON());
+    // Every command is global now (leveling is switched on per server from the dashboard)
+    const allCommands = commands.map(cmd => cmd.toJSON());
 
-    // All other commands (global)
-    const otherCommands = commands
-      .filter(cmd => !["level", "leaderboard"].includes(cmd.name))
-      .map(cmd => cmd.toJSON());
-
+    // Clear the old Group-Server-only copies so /level and /leaderboard don't show twice
     if (GROUP_SERVER_ID) {
       await rest.put(
         Routes.applicationGuildCommands(client.user.id, GROUP_SERVER_ID),
-        { body: levelingCommands }
+        { body: [] }
       );
-      console.log("✅ Leveling commands registered to GROUP SERVER!");
     }
 
     await rest.put(
       Routes.applicationCommands(client.user.id),
-      { body: otherCommands }
+      { body: allCommands }
     );
     console.log("✅ Global commands registered!");
   } catch (err) {
@@ -556,17 +552,19 @@ client.on("interactionCreate", async interaction => {
   try {
     // AI ask
     if (cmd === "ask") {
+      let aiPrompt;
       if (interaction.guild) {
         const cfg = await getGuildConfig(interaction.guild.id);
         if (!cfg.aiEnabled) {
           return interaction.reply({ content: "❌ AI replies are disabled in this server.", flags: 64 });
         }
+        aiPrompt = cfg.aiPersonality;
       }
 
       const question = interaction.options.getString("question");
       await interaction.deferReply();
 
-      const reply = await callGroq(interaction.user.id, question);
+      const reply = await callGroq(interaction.user.id, question, aiPrompt);
       await interaction.editReply(reply.slice(0, 2000));
       await sendLog(client, `💬 /ask by ${interaction.user.tag}: ${question}`);
     }
@@ -615,6 +613,9 @@ client.on("interactionCreate", async interaction => {
       if (!interaction.memberPermissions.has(PermissionFlagsBits.ManageGuild)) {
         return interaction.reply({ content: "❌ You need the Manage Server permission to use this.", flags: 64 });
       }
+      if (process.env.DASHBOARD_OWNER_ONLY === "true" && interaction.user.id !== interaction.guild.ownerId) {
+        return interaction.reply({ content: "❌ Only the server owner can use this command.", flags: 64 });
+      }
       if (!DASHBOARD_URL) {
         return interaction.reply({ content: "⚠️ The dashboard URL isn't configured (DASHBOARD_URL).", flags: 64 });
       }
@@ -633,8 +634,8 @@ client.on("interactionCreate", async interaction => {
 
     // ===== LEVELING COMMANDS (GROUP SERVER ONLY) =====
     if (cmd === "level") {
-      if (interaction.guild.id !== GROUP_SERVER_ID) {
-        return interaction.reply({ content: "❌ This command only works in the Group Server!", flags: 64 });
+      if (!(await getGuildConfig(interaction.guild.id)).xpEnabled) {
+        return interaction.reply({ content: "❌ Leveling is disabled in this server. An admin can enable it in the dashboard.", flags: 64 });
       }
 
       const user = interaction.options.getUser("user") || interaction.user;
@@ -662,8 +663,8 @@ client.on("interactionCreate", async interaction => {
     }
 
     if (cmd === "leaderboard") {
-      if (interaction.guild.id !== GROUP_SERVER_ID) {
-        return interaction.reply({ content: "❌ This command only works in the Group Server!", flags: 64 });
+      if (!(await getGuildConfig(interaction.guild.id)).xpEnabled) {
+        return interaction.reply({ content: "❌ Leveling is disabled in this server. An admin can enable it in the dashboard.", flags: 64 });
       }
 
       const users = await getLeaderboard(interaction.guild.id, 10);
@@ -702,7 +703,7 @@ client.on("interactionCreate", async interaction => {
       if (!member) return interaction.reply({ content: "Member not found.", flags: 64 });
       if (!member.kickable) return interaction.reply({ content: "I cannot kick that user.", flags: 64 });
 
-      await sendModActionDM(client, interaction.guild.name, target.id, "Kicked from server", reason);
+      await sendModActionDM(client, interaction.guild, target.id, "Kicked from server", reason);
       await member.kick(reason);
 
       await interaction.reply(`✅ Kicked ${target.tag} — ${reason}`);
@@ -719,7 +720,7 @@ client.on("interactionCreate", async interaction => {
       const target = interaction.options.getUser("target");
       const reason = interaction.options.getString("reason") || "No reason provided";
 
-      await sendModActionDM(client, interaction.guild.name, target.id, "Banned from server", reason);
+      await sendModActionDM(client, interaction.guild, target.id, "Banned from server", reason);
       await interaction.guild.members.ban(target.id, { reason });
 
       await interaction.reply({ content: `✅ Banned ${target.tag}`, flags: 64 });
@@ -765,9 +766,7 @@ client.on("interactionCreate", async interaction => {
       await interaction.deferReply({ flags: 64 });
 
       // DM BEFORE the ban — after it, the bot may no longer share a server with them
-      await sendModActionDM(
-        client,
-        interaction.guild.name,
+      await sendModActionDM(client, interaction.guild,
         target.id,
         "Softbanned (kicked + recent messages deleted). You can rejoin with a new invite.",
         reason
@@ -809,7 +808,7 @@ client.on("interactionCreate", async interaction => {
         await interaction.reply(`✅ Unbanned user with ID ${userId}`);
         await sendLog(client, `♻️ ${interaction.user.tag} unbanned ${userId}`);
 
-        await sendModActionDM(client, interaction.guild.name, userId, "Unbanned from server", "Unban");
+        await sendModActionDM(client, interaction.guild, userId, "Unbanned from server", "Unban");
         await sendPublicModMessage(
           client,
           interaction.guild.id,
@@ -839,7 +838,7 @@ client.on("interactionCreate", async interaction => {
       await member.timeout(minutes * 60 * 1000, `Muted by ${interaction.user.tag}`);
       await interaction.reply(`🔇 ${target.tag} muted for ${minutes} minute(s).`);
 
-      await sendModActionDM(client, interaction.guild.name, target.id, "Muted on server", "Timeout applied", `${minutes} minute(s)`);
+      await sendModActionDM(client, interaction.guild, target.id, "Muted on server", "Timeout applied", `${minutes} minute(s)`);
       await sendPublicModMessage(
         client,
         interaction.guild.id,
@@ -868,7 +867,7 @@ client.on("interactionCreate", async interaction => {
       await interaction.reply(`🔊 ${target.tag} has been unmuted.`);
       await sendLog(client, `🔊 ${interaction.user.tag} unmuted ${target.tag}`);
 
-      await sendModActionDM(client, interaction.guild.name, target.id, "Unmuted from server", "Timeout removed");
+      await sendModActionDM(client, interaction.guild, target.id, "Unmuted from server", "Timeout removed");
       await sendPublicModMessage(
         client,
         interaction.guild.id,
@@ -900,8 +899,38 @@ client.on("interactionCreate", async interaction => {
       await interaction.reply(`⚠️ Warned ${target.tag}: ${reason}`);
       await sendLog(client, `⚠️ ${interaction.user.tag} warned ${target.tag}: ${reason}`);
 
-      await sendModActionDM(client, interaction.guild.name, target.id, "Warning on server", reason);
+      await sendModActionDM(client, interaction.guild, target.id, "Warning on server", reason);
       await sendPublicModMessage(client, interaction.guild.id, "User Warned", target, interaction.user, reason, { color: 0xFFA500 });
+
+      // Auto-punishment once the warning threshold is reached (set in the dashboard)
+      const warnCfg = await getGuildConfig(interaction.guild.id);
+      if (warnCfg.warnThreshold > 0) {
+        const total = await warningsCollection.countDocuments({ guildId: interaction.guild.id, userId: target.id });
+        if (total % warnCfg.warnThreshold === 0) {
+          try {
+            const m = await interaction.guild.members.fetch(target.id).catch(() => null);
+            let done = null;
+            if (m && warnCfg.warnAction === "mute" && m.moderatable) {
+              await m.timeout(warnCfg.warnMuteMinutes * 60 * 1000, `Auto: reached ${total} warnings`);
+              done = `muted for ${warnCfg.warnMuteMinutes} minute(s)`;
+            } else if (m && warnCfg.warnAction === "kick" && m.kickable) {
+              await m.kick(`Auto: reached ${total} warnings`);
+              done = "kicked";
+            } else if (warnCfg.warnAction === "ban" && (!m || m.bannable)) {
+              await interaction.guild.members.ban(target.id, { reason: `Auto: reached ${total} warnings` });
+              done = "banned";
+            }
+            if (done) {
+              await interaction.followUp({ content: `🚨 ${target.tag} reached ${total} warnings and was automatically ${done}.` });
+              await sendPublicModMessage(client, interaction.guild.id, `Auto-punish: ${warnCfg.warnAction}`, target, client.user, `Reached ${total} warnings`, { color: 0xff0000 });
+            } else {
+              await interaction.followUp({ content: `⚠️ ${target.tag} reached ${total} warnings, but I couldn't apply the automatic ${warnCfg.warnAction} (check my role/permissions).`, flags: 64 });
+            }
+          } catch (err) {
+            console.error("Warn auto-punish failed:", err);
+          }
+        }
+      }
     }
 
     // warnings
@@ -947,14 +976,79 @@ client.on("interactionCreate", async interaction => {
   }
 });
 
-// === Message handler (AI via !chat or mention + XP gain) ===
+// === Auto-moderation ===
+const INVITE_RE = /(discord\.gg|discord(?:app)?\.com\/invite)\/\S+/i;
+const LINK_RE = /https?:\/\/\S+/i;
+const blockedWordCache = new Map(); // raw setting text -> compiled RegExp (or null)
+
+function getBlockedWordsRegex(raw) {
+  if (!raw) return null;
+  if (blockedWordCache.has(raw)) return blockedWordCache.get(raw);
+  const words = raw.split(/[,\n]/).map(w => w.trim()).filter(Boolean).slice(0, 100);
+  const re = words.length
+    ? new RegExp(
+        `(?<![\\p{L}\\p{N}])(?:${words.map(w => w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})(?![\\p{L}\\p{N}])`,
+        "iu"
+      )
+    : null;
+  if (blockedWordCache.size > 500) blockedWordCache.clear();
+  blockedWordCache.set(raw, re);
+  return re;
+}
+
+// Returns true if the message was removed
+async function runAutomod(message, cfg) {
+  if (!cfg.automodBlockInvites && !cfg.automodBlockLinks && !cfg.automodBlockedWords) return false;
+
+  const member = message.member;
+  if (
+    !member ||
+    member.permissions.has(PermissionFlagsBits.ManageMessages) ||
+    member.permissions.has(PermissionFlagsBits.Administrator)
+  ) return false;
+
+  const text = message.content || "";
+  let reason = null;
+  if (cfg.automodBlockLinks && LINK_RE.test(text)) reason = "Links are not allowed here";
+  else if ((cfg.automodBlockInvites || cfg.automodBlockLinks) && INVITE_RE.test(text)) reason = "Invite links are not allowed here";
+  else {
+    const re = getBlockedWordsRegex(cfg.automodBlockedWords);
+    if (re && re.test(text)) reason = "That word is not allowed here";
+  }
+  if (!reason) return false;
+
+  const myPerms = message.channel.permissionsFor(message.guild.members.me);
+  if (!myPerms?.has(PermissionFlagsBits.ManageMessages)) return false;
+
+  const deleted = await message.delete().then(() => true).catch(() => false);
+  if (!deleted) return false;
+
+  const notice = await message.channel.send({ content: `${message.author}, ${reason}.`, allowedMentions: { users: [message.author.id] } }).catch(() => null);
+  if (notice) setTimeout(() => notice.delete().catch(() => {}), 5000);
+
+  await sendPublicModMessage(client, message.guild.id, "Auto-mod: message removed", message.author, client.user, reason, { color: 0xE67E22 });
+  return true;
+}
+
+// === Message handler (automod + XP + AI) ===
+const xpCooldowns = new Map(); // "guildId:userId" -> last XP timestamp
+
 client.on("messageCreate", async message => {
   try {
-    // ===== XP GAIN (GROUP SERVER ONLY, can be toggled from the dashboard) =====
-    if (!message.author.bot && message.guild && message.guild.id === GROUP_SERVER_ID) {
-      const cfg = await getGuildConfig(message.guild.id);
-      if (cfg.xpEnabled) {
-        const result = await addXPToUser(message.guild.id, message.author.id);
+    const cfg = message.guild ? await getGuildConfig(message.guild.id) : null;
+
+    // ===== AUTO-MOD =====
+    if (cfg && !message.author.bot) {
+      if (await runAutomod(message, cfg)) return;
+    }
+
+    // ===== XP GAIN (per-server toggle, amount and cooldown from the dashboard) =====
+    if (cfg && cfg.xpEnabled && !message.author.bot) {
+      const key = `${message.guild.id}:${message.author.id}`;
+      const now = Date.now();
+      if (now - (xpCooldowns.get(key) || 0) >= cfg.xpCooldownSeconds * 1000) {
+        xpCooldowns.set(key, now);
+        const result = await addXPToUser(message.guild.id, message.author.id, cfg.xpPerMessage);
         if (result.leveledUp) {
           await sendLevelUpMessage(client, message.author.id, result.newLevel, result.totalXP, message.guild.id);
         }
@@ -962,18 +1056,13 @@ client.on("messageCreate", async message => {
     }
 
     // ===== AI REPLY LOGIC =====
-    if (!shouldReply(message)) return;
-
-    // Per-server AI toggle from the dashboard (DMs always allowed)
-    if (message.guild) {
-      const cfg = await getGuildConfig(message.guild.id);
-      if (!cfg.aiEnabled) return;
-    }
+    if (!shouldReply(message, cfg)) return;
+    if (cfg && !cfg.aiEnabled) return; // DMs have no cfg and are always allowed
 
     const text = extractUserText(message);
 
     await message.channel.sendTyping();
-    const reply = await callGroq(message.author.id, text);
+    const reply = await callGroq(message.author.id, text, cfg?.aiPersonality);
     await sendLog(client, `💭 ${message.author.tag}: ${text}`);
 
     if (reply.length <= 2000) return message.reply(reply);
@@ -983,6 +1072,50 @@ client.on("messageCreate", async message => {
   } catch (err) {
     console.error("messageCreate error:", err);
     await sendLog(client, `⚠️ messageCreate error: ${err.message}`);
+  }
+});
+
+// === Welcome / leave messages + auto-role ===
+function formatTemplate(tpl, member) {
+  return String(tpl)
+    .replaceAll("{user}", `<@${member.id}>`)
+    .replaceAll("{username}", member.user?.username ?? "Someone")
+    .replaceAll("{server}", member.guild.name)
+    .replaceAll("{count}", String(member.guild.memberCount));
+}
+
+client.on("guildMemberAdd", async member => {
+  try {
+    const cfg = await getGuildConfig(member.guild.id);
+
+    if (cfg.autoRoleId) {
+      const role = member.guild.roles.cache.get(cfg.autoRoleId);
+      if (role && role.editable) {
+        await member.roles.add(role, "Auto-role").catch(err => console.error("Auto-role failed:", err.message));
+      }
+    }
+
+    if (cfg.welcomeEnabled && cfg.welcomeChannelId && !member.user.bot) {
+      const channel = member.guild.channels.cache.get(cfg.welcomeChannelId);
+      if (channel?.isTextBased()) {
+        await channel.send({ content: formatTemplate(cfg.welcomeMessage, member), allowedMentions: { users: [member.id] } });
+      }
+    }
+  } catch (err) {
+    console.error("guildMemberAdd error:", err);
+  }
+});
+
+client.on("guildMemberRemove", async member => {
+  try {
+    const cfg = await getGuildConfig(member.guild.id);
+    if (!cfg.leaveEnabled || !cfg.leaveChannelId || member.user?.bot) return;
+    const channel = member.guild.channels.cache.get(cfg.leaveChannelId);
+    if (channel?.isTextBased()) {
+      await channel.send({ content: formatTemplate(cfg.leaveMessage, member), allowedMentions: { parse: [] } });
+    }
+  } catch (err) {
+    console.error("guildMemberRemove error:", err);
   }
 });
 
