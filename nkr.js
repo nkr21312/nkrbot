@@ -48,7 +48,8 @@ const db = mongoClient.db("nkrbot");
 const levelsCollection = db.collection("levels");
 const warningsCollection = db.collection("warnings");
 const guildConfigCollection = db.collection("guildConfig");
-const modActionsCollection = db.collection("modActions"); // NEW: feeds the dashboard's "recent actions"
+const modActionsCollection = db.collection("modActions"); // feeds the dashboard + /userlogs
+modActionsCollection.createIndex({ guildId: 1, targetId: 1, time: -1 }).catch(console.error);
 
 // === Leveling System Config (GROUP SERVER ONLY) ===
 const XP_PER_MESSAGE = 10; // Base XP per message
@@ -213,6 +214,7 @@ async function sendModActionDM(client, guild, userId, action, reason, duration =
         { name: "🏠 Server", value: guildName, inline: true },
         { name: "📝 Reason", value: reason || "No reason provided", inline: true }
       ],
+      footer: { text: `User ID: ${userId}` },
       timestamp: new Date()
     };
 
@@ -261,6 +263,7 @@ async function sendPublicModMessage(client, guildId, action, target, moderator, 
         { name: "🛡 Moderator", value: `<@${moderator.id}>`, inline: true },
         { name: "📝 Reason", value: reason || "No reason provided" }
       ],
+      footer: { text: `User ID: ${target.id}` },
       timestamp: new Date()
     };
 
@@ -294,6 +297,7 @@ async function sendLevelUpMessage(client, userId, newLevel, totalXP, guildId) {
           { name: "New Level", value: `${newLevel}`, inline: true },
           { name: "Total XP", value: `${totalXP}`, inline: true }
         ],
+        footer: { text: `User ID: ${userId}` },
         timestamp: new Date()
       };
 
@@ -480,6 +484,15 @@ const commands = [
     .setDescription("Clear messages")
     .addIntegerOption(o => o.setName("amount").setDescription("Number of messages").setRequired(true)),
 
+  // ===== NEW: full moderation history of one member in this server =====
+  new SlashCommandBuilder()
+    .setName("userlogs")
+    .setDescription("Show every moderation log for a member in this server")
+    .addUserOption(o => o.setName("user").setDescription("Member to look up").setRequired(true))
+    .addIntegerOption(o => o.setName("page").setDescription("Page number (10 entries per page)").setMinValue(1))
+    .setDMPermission(false)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
   // Set the channel for global mod messages (per server)
   new SlashCommandBuilder()
     .setName("setmodlog")
@@ -577,7 +590,7 @@ client.on("interactionCreate", async interaction => {
           description:
             "**/ask** • Ask the AI\n**/donate** • Support\n**/level** • Check your level (Group Server)\n**/leaderboard** • See top users (Group Server)\n" +
             "**/setmodlog** • Set this server's mod-log channel (Manage Server)\n**/dashboard** • Get a code to link this server to the web dashboard (Manage Server)\n\n" +
-            "**Moderation:** /kick /ban /softban /unban /mute /unmute /warn /warnings /clear",
+            "**Moderation:** /kick /ban /softban /unban /mute /unmute /warn /warnings /userlogs /clear",
           color: 0x5865f2
         }],
         flags: 64
@@ -649,6 +662,7 @@ client.on("interactionCreate", async interaction => {
       const embed = {
         color: 0x5865f2,
         title: `📊 ${user.username}'s Level Info`,
+        footer: { text: `User ID: ${user.id}` },
         thumbnail: { url: user.displayAvatarURL() },
         fields: [
           { name: "🎖️ Level", value: `${levelInfo.level}`, inline: true },
@@ -903,32 +917,12 @@ client.on("interactionCreate", async interaction => {
       await sendPublicModMessage(client, interaction.guild.id, "User Warned", target, interaction.user, reason, { color: 0xFFA500 });
 
       // Auto-punishment once the warning threshold is reached (set in the dashboard)
-      const warnCfg = await getGuildConfig(interaction.guild.id);
-      if (warnCfg.warnThreshold > 0) {
-        const total = await warningsCollection.countDocuments({ guildId: interaction.guild.id, userId: target.id });
-        if (total % warnCfg.warnThreshold === 0) {
-          try {
-            const m = await interaction.guild.members.fetch(target.id).catch(() => null);
-            let done = null;
-            if (m && warnCfg.warnAction === "mute" && m.moderatable) {
-              await m.timeout(warnCfg.warnMuteMinutes * 60 * 1000, `Auto: reached ${total} warnings`);
-              done = `muted for ${warnCfg.warnMuteMinutes} minute(s)`;
-            } else if (m && warnCfg.warnAction === "kick" && m.kickable) {
-              await m.kick(`Auto: reached ${total} warnings`);
-              done = "kicked";
-            } else if (warnCfg.warnAction === "ban" && (!m || m.bannable)) {
-              await interaction.guild.members.ban(target.id, { reason: `Auto: reached ${total} warnings` });
-              done = "banned";
-            }
-            if (done) {
-              await interaction.followUp({ content: `🚨 ${target.tag} reached ${total} warnings and was automatically ${done}.` });
-              await sendPublicModMessage(client, interaction.guild.id, `Auto-punish: ${warnCfg.warnAction}`, target, client.user, `Reached ${total} warnings`, { color: 0xff0000 });
-            } else {
-              await interaction.followUp({ content: `⚠️ ${target.tag} reached ${total} warnings, but I couldn't apply the automatic ${warnCfg.warnAction} (check my role/permissions).`, flags: 64 });
-            }
-          } catch (err) {
-            console.error("Warn auto-punish failed:", err);
-          }
+      const esc = await checkWarnEscalation(interaction.guild, target);
+      if (esc) {
+        if (esc.done) {
+          await interaction.followUp({ content: `🚨 ${target.tag} reached ${esc.total} warnings and was automatically ${esc.done}.` });
+        } else {
+          await interaction.followUp({ content: `⚠️ ${target.tag} reached ${esc.total} warnings, but I couldn't apply the automatic ${esc.action} (check my role is above theirs and I have the permission).`, flags: 64 });
         }
       }
     }
@@ -944,6 +938,66 @@ client.on("interactionCreate", async interaction => {
 
       const lines = list.map((w, i) => `${i + 1}. ${w.reason} — by ${w.moderator} on ${w.time}`).join("\n");
       await interaction.reply({ content: `Warnings for ${target.tag}:\n${lines}`, flags: 64 });
+    }
+
+    // ===== NEW: userlogs =====
+    if (cmd === "userlogs") {
+      if (
+        !interaction.memberPermissions.has(PermissionFlagsBits.ModerateMembers) &&
+        !interaction.memberPermissions.has(PermissionFlagsBits.KickMembers)
+      ) {
+        return interaction.reply({ content: "❌ You need the Moderate Members permission to use this.", flags: 64 });
+      }
+
+      const user = interaction.options.getUser("user");
+      const page = interaction.options.getInteger("page") ?? 1;
+      const PAGE_SIZE = 10;
+      const filter = { guildId: interaction.guild.id, targetId: user.id };
+
+      const [total, entries, byAction, warnCount, member] = await Promise.all([
+        modActionsCollection.countDocuments(filter),
+        modActionsCollection.find(filter).sort({ time: -1 }).skip((page - 1) * PAGE_SIZE).limit(PAGE_SIZE).toArray(),
+        modActionsCollection.aggregate([{ $match: filter }, { $group: { _id: "$action", n: { $sum: 1 } } }, { $sort: { n: -1 } }]).toArray(),
+        warningsCollection.countDocuments({ guildId: interaction.guild.id, userId: user.id }),
+        interaction.guild.members.fetch(user.id).catch(() => null)
+      ]);
+
+      if (total === 0 && warnCount === 0) {
+        return interaction.reply({ content: `✅ No moderation records for **${user.tag}** (ID: ${user.id}) in this server.`, flags: 64 });
+      }
+
+      const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+      let description = entries.length
+        ? entries.map((e, i) => {
+            const unix = Math.floor(new Date(e.time).getTime() / 1000);
+            const extra = e.duration ? ` • ${e.duration}` : "";
+            const reason = String(e.reason || "No reason provided").slice(0, 120);
+            return `**${(page - 1) * PAGE_SIZE + i + 1}.** <t:${unix}:f> • **${e.action}**${extra}\n└ by ${e.moderatorTag} — ${reason}`;
+          }).join("\n\n")
+        : "No entries on this page.";
+      if (description.length > 4000) description = description.slice(0, 3990) + "…";
+
+      const summary = byAction.length
+        ? byAction.map(a => `${a._id}: **${a.n}**`).join("\n").slice(0, 1000)
+        : "—";
+
+      const embed = {
+        color: 0x5865f2,
+        title: `📁 Mod logs — ${user.tag}`,
+        thumbnail: { url: user.displayAvatarURL() },
+        description,
+        fields: [
+          { name: "📊 Summary", value: summary },
+          { name: "⚠️ Warnings on record", value: String(warnCount), inline: true },
+          { name: "📌 Total actions", value: String(total), inline: true },
+          { name: "👥 In server", value: member ? "Yes" : "No", inline: true }
+        ],
+        footer: { text: `User ID: ${user.id} • Page ${Math.min(page, pages)}/${pages}` },
+        timestamp: new Date()
+      };
+
+      await interaction.reply({ embeds: [embed], flags: 64 });
     }
 
     // clear messages
@@ -975,6 +1029,39 @@ client.on("interactionCreate", async interaction => {
     await sendLog(client, `⚠️ Command error: ${err.message}`);
   }
 });
+
+// === Warning threshold auto-punishment (used by /warn AND auto-mod) ===
+async function checkWarnEscalation(guild, user) {
+  const cfg = await getGuildConfig(guild.id);
+  if (!cfg.warnThreshold || cfg.warnThreshold <= 0) return null;
+
+  const total = await warningsCollection.countDocuments({ guildId: guild.id, userId: user.id });
+  if (total === 0 || total % cfg.warnThreshold !== 0) return null;
+
+  try {
+    const m = await guild.members.fetch(user.id).catch(() => null);
+    let done = null;
+
+    if (m && cfg.warnAction === "mute" && m.moderatable) {
+      await m.timeout(cfg.warnMuteMinutes * 60 * 1000, `Auto: reached ${total} warnings`);
+      done = `muted for ${cfg.warnMuteMinutes} minute(s)`;
+    } else if (m && cfg.warnAction === "kick" && m.kickable) {
+      await m.kick(`Auto: reached ${total} warnings`);
+      done = "kicked";
+    } else if (cfg.warnAction === "ban" && (!m || m.bannable)) {
+      await guild.members.ban(user.id, { reason: `Auto: reached ${total} warnings` });
+      done = "banned";
+    }
+
+    if (done) {
+      await sendPublicModMessage(client, guild.id, `Auto-punish: ${cfg.warnAction}`, user, client.user, `Reached ${total} warnings`, { color: 0xff0000 });
+    }
+    return { total, done, action: cfg.warnAction };
+  } catch (err) {
+    console.error("Warn auto-punish failed:", err);
+    return { total, done: null, action: cfg.warnAction };
+  }
+}
 
 // === Auto-moderation ===
 const INVITE_RE = /(discord\.gg|discord(?:app)?\.com\/invite)\/\S+/i;
@@ -1027,6 +1114,26 @@ async function runAutomod(message, cfg) {
   if (notice) setTimeout(() => notice.delete().catch(() => {}), 5000);
 
   await sendPublicModMessage(client, message.guild.id, "Auto-mod: message removed", message.author, client.user, reason, { color: 0xE67E22 });
+
+  // Optionally count this as a warning so the auto-punish threshold can kick in
+  if (cfg.automodAddWarning) {
+    await warningsCollection.insertOne({
+      guildId: message.guild.id,
+      userId: message.author.id,
+      moderator: client.user.tag,
+      reason: `Auto-mod: ${reason}`,
+      time: new Date().toISOString()
+    });
+    await sendModActionDM(client, message.guild, message.author.id, "Warning on server", `Auto-mod: ${reason}`);
+
+    const esc = await checkWarnEscalation(message.guild, message.author);
+    if (esc) {
+      const msg = esc.done
+        ? `🚨 ${message.author} reached ${esc.total} warnings and was automatically ${esc.done}.`
+        : `⚠️ ${message.author} reached ${esc.total} warnings, but I couldn't apply the automatic ${esc.action} (check my role is above theirs and I have the permission).`;
+      await message.channel.send({ content: msg, allowedMentions: { users: [message.author.id] } }).catch(() => null);
+    }
+  }
   return true;
 }
 

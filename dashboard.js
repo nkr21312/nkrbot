@@ -142,7 +142,8 @@ export const SETTINGS_SCHEMA = [
     fields: [
       { key: "automodBlockInvites", type: "bool", def: false, label: "Delete Discord invite links" },
       { key: "automodBlockLinks", type: "bool", def: false, label: "Delete all links (includes invites)" },
-      { key: "automodBlockedWords", type: "textarea", def: "", maxLen: 1000, label: "Blocked words", help: "Separate with commas or new lines. Whole words only, not case-sensitive." }
+      { key: "automodBlockedWords", type: "textarea", def: "", maxLen: 1000, label: "Blocked words", help: "Separate with commas or new lines. Whole words only, not case-sensitive." },
+      { key: "automodAddWarning", type: "bool", def: false, label: "Also add a warning when auto-mod removes a message", help: "These warnings count toward the auto-punish threshold in Moderation (e.g. 2 removed messages = auto-mute if the threshold is 2)." }
     ]
   },
   {
