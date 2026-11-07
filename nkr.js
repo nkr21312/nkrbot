@@ -14,10 +14,15 @@ import {
   REST,
   Routes,
   PermissionFlagsBits,
-  ChannelType
+  ChannelType,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType
 } from "discord.js";
 import fetch from "node-fetch";
 import express from "express";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createDashboard, createLinkCode, SETTINGS_DEFAULTS } from "./dashboard.js";
 
 // === Config / tokens ===
@@ -50,6 +55,42 @@ const warningsCollection = db.collection("warnings");
 const guildConfigCollection = db.collection("guildConfig");
 const modActionsCollection = db.collection("modActions"); // feeds the dashboard + /userlogs
 modActionsCollection.createIndex({ guildId: 1, targetId: 1, time: -1 }).catch(console.error);
+const aiUsageCollection = db.collection("aiUsage"); // daily AI response counter per server
+const countersCollection = db.collection("counters"); // per-server action ID counter
+modActionsCollection.createIndex({ guildId: 1, caseId: 1 }, { unique: true, partialFilterExpression: { caseId: { $type: "number" } } }).catch(console.error);
+
+// ===== Action IDs: every recorded action gets a short per-server number (#1, #2, ...) =====
+// A command run keeps ONE "pending" ID in an async context so the DM, the reply, the warning
+// record and the mod-log embed all show the SAME number.
+const actionContext = new AsyncLocalStorage();
+
+async function nextCaseId(guildId) {
+  const r = await countersCollection.findOneAndUpdate(
+    { _id: guildId },
+    { $inc: { seq: 1 } },
+    { upsert: true, returnDocument: "after" }
+  );
+  return (r?.value ?? r).seq;
+}
+async function peekActionId(guildId) {
+  const s = actionContext.getStore();
+  if (!s) return null;
+  if (s.pending == null) s.pending = await nextCaseId(guildId);
+  return s.pending;
+}
+async function takeActionId(guildId) {
+  const s = actionContext.getStore();
+  if (s && s.pending != null) {
+    const id = s.pending;
+    s.pending = null;
+    return id;
+  }
+  return nextCaseId(guildId);
+}
+async function aidTag(guildId) {
+  const id = await peekActionId(guildId);
+  return id ? ` • Action ID **#${id}**` : "";
+}
 
 // === Leveling System Config (GROUP SERVER ONLY) ===
 const XP_PER_MESSAGE = 10; // Base XP per message
@@ -138,7 +179,7 @@ async function getLeaderboard(guildId, limit = 10) {
 
 // ===== Per-guild config (shared by slash commands AND the web dashboard) =====
 // Defaults come from the dashboard's settings schema so the website and bot never drift apart
-const DEFAULT_GUILD_CONFIG = SETTINGS_DEFAULTS;
+const DEFAULT_GUILD_CONFIG = { ...SETTINGS_DEFAULTS, commandRules: {} };
 
 // Simple in-memory cache so we don't hit Mongo on every message / mod action
 const guildConfigCache = new Map();
@@ -180,7 +221,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessageReactions,
     GatewayIntentBits.GuildMembers
   ],
-  partials: [Partials.Channel]
+  partials: [Partials.Channel, Partials.Message]
 });
 
 // === Web server (Render keep-alive + dashboard) ===
@@ -192,7 +233,7 @@ app.get("/", (req, res) => res.send("🧠 NKR.bot is alive!"));
 
 app.use(
   "/dashboard",
-  createDashboard({ client, db, mongoClient, getGuildConfig, setGuildConfig })
+  createDashboard({ client, db, mongoClient, getGuildConfig, setGuildConfig, getCommandNames: () => commands.map(c => c.name) })
 );
 
 app.listen(process.env.PORT || 3000, () =>
@@ -205,6 +246,7 @@ async function sendModActionDM(client, guild, userId, action, reason, duration =
     const cfg = await getGuildConfig(guild.id);
     if (!cfg.dmOnAction) return;
     const guildName = guild.name;
+    const caseId = await peekActionId(guild.id);
     const user = await client.users.fetch(userId);
 
     const embed = {
@@ -214,7 +256,7 @@ async function sendModActionDM(client, guild, userId, action, reason, duration =
         { name: "🏠 Server", value: guildName, inline: true },
         { name: "📝 Reason", value: reason || "No reason provided", inline: true }
       ],
-      footer: { text: `User ID: ${userId}` },
+      footer: { text: `User ID: ${userId}${caseId ? ` • Action ID #${caseId}` : ""}` },
       timestamp: new Date()
     };
 
@@ -232,9 +274,11 @@ async function sendModActionDM(client, guild, userId, action, reason, duration =
 
 // Records every mod action (shown on the dashboard) and posts to the guild's mod-log channel.
 async function sendPublicModMessage(client, guildId, action, target, moderator, reason, extra = {}) {
-  // 1) Always record to Mongo for the dashboard, even if no mod-log channel is configured
-  modActionsCollection
+  // 1) Always record to Mongo (dashboard, /userlogs), even if no mod-log channel is configured
+  const caseId = await takeActionId(guildId);
+  const recorded = modActionsCollection
     .insertOne({
+      caseId,
       guildId,
       action,
       targetId: target.id,
@@ -250,10 +294,10 @@ async function sendPublicModMessage(client, guildId, action, target, moderator, 
   // 2) Post to the configured mod-log channel
   try {
     const channelId = await getModLogChannelId(guildId);
-    if (!channelId) return; // this server hasn't set a mod-log channel yet
+    if (!channelId) return caseId; // this server hasn't set a mod-log channel yet
 
     const channel = await client.channels.fetch(channelId).catch(() => null);
-    if (!channel || !channel.isTextBased()) return;
+    if (!channel || !channel.isTextBased()) return caseId;
 
     const embed = {
       color: extra.color || 0xff0000,
@@ -263,7 +307,7 @@ async function sendPublicModMessage(client, guildId, action, target, moderator, 
         { name: "🛡 Moderator", value: `<@${moderator.id}>`, inline: true },
         { name: "📝 Reason", value: reason || "No reason provided" }
       ],
-      footer: { text: `User ID: ${target.id}` },
+      footer: { text: `User ID: ${target.id} • Action ID #${caseId}` },
       timestamp: new Date()
     };
 
@@ -271,10 +315,17 @@ async function sendPublicModMessage(client, guildId, action, target, moderator, 
       embed.fields.push({ name: "⏱ Duration", value: extra.duration });
     }
 
-    await channel.send({ embeds: [embed] });
+    const sent = await channel.send({ embeds: [embed] });
+
+    // Remember where the embed lives so /editreason can update it later
+    await recorded;
+    await modActionsCollection
+      .updateOne({ guildId, caseId }, { $set: { logChannelId: channel.id, logMessageId: sent.id } })
+      .catch(() => {});
   } catch (err) {
     console.error("Failed to send public mod message:", err);
   }
+  return caseId;
 }
 
 // Send level-up message to dedicated channel (GROUP SERVER ONLY)
@@ -325,7 +376,7 @@ async function sendLog(client, content) {
 }
 
 // === Helper: AI call (Groq) ===
-async function callGroq(userId, userText, systemPrompt) {
+async function callGroq(userId, userText, systemPrompt, maxTokens) {
   if (!GROQ_API_KEY) throw new Error("Missing Groq key");
 
   if (!memory.has(userId)) memory.set(userId, []);
@@ -340,7 +391,7 @@ async function callGroq(userId, userText, systemPrompt) {
       { role: "system", content: systemPrompt || "You are a friendly Discord assistant. Keep answers concise." },
       ...convo
     ],
-    max_tokens: 500
+    max_tokens: maxTokens || 500
   };
 
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
@@ -493,6 +544,28 @@ const commands = [
     .setDMPermission(false)
     .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
 
+  // ===== NEW: delete one / all logs of a user ID =====
+  new SlashCommandBuilder()
+    .setName("clearlogs")
+    .setDescription("Delete one or ALL moderation logs of a user ID in this server")
+    .addStringOption(o => o.setName("userid").setDescription("User ID whose logs to delete").setRequired(true))
+    .addIntegerOption(o =>
+      o.setName("entry")
+        .setDescription("Entry number from /userlogs to delete. Leave EMPTY to delete ALL logs + warnings of this user")
+        .setMinValue(1)
+    )
+    .setDMPermission(false)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+
+  // ===== NEW: change the reason of a logged action by its Action ID =====
+  new SlashCommandBuilder()
+    .setName("editreason")
+    .setDescription("Change the reason of a logged action using its Action ID")
+    .addIntegerOption(o => o.setName("id").setDescription("Action ID number (shown as #123 in logs and embeds)").setRequired(true).setMinValue(1))
+    .addStringOption(o => o.setName("reason").setDescription("The new reason").setRequired(true).setMaxLength(500))
+    .setDMPermission(false)
+    .setDefaultMemberPermissions(PermissionFlagsBits.ModerateMembers),
+
   // Set the channel for global mod messages (per server)
   new SlashCommandBuilder()
     .setName("setmodlog")
@@ -557,27 +630,51 @@ client.once("ready", async () => {
 });
 
 // === Interaction handler ===
-client.on("interactionCreate", async interaction => {
+client.on("interactionCreate", interaction => {
   if (!interaction.isChatInputCommand()) return;
+  actionContext.run({ pending: null }, () => handleInteraction(interaction));
+});
+
+async function handleInteraction(interaction) {
 
   const cmd = interaction.commandName;
 
   try {
+    // ===== Per-server command rules from the dashboard (enabled + allowed channels) =====
+    if (interaction.guild && cmd !== "dashboard") {
+      const rule = (await getGuildConfig(interaction.guild.id)).commandRules?.[cmd];
+      if (rule) {
+        if (rule.enabled === false) {
+          return interaction.reply({ content: `❌ /${cmd} is disabled in this server.`, flags: 64 });
+        }
+        const allowed = rule.channels || [];
+        const parent = interaction.channel?.parentId; // threads inherit their parent channel's rule
+        if (allowed.length && !allowed.includes(interaction.channelId) && !(parent && allowed.includes(parent))) {
+          return interaction.reply({ content: `❌ /${cmd} can only be used in ${allowed.map(id => `<#${id}>`).join(", ")}.`, flags: 64 });
+        }
+      }
+    }
+
     // AI ask
     if (cmd === "ask") {
-      let aiPrompt;
+      let aiPrompt, aiTokens;
       if (interaction.guild) {
         const cfg = await getGuildConfig(interaction.guild.id);
         if (!cfg.aiEnabled) {
           return interaction.reply({ content: "❌ AI replies are disabled in this server.", flags: 64 });
         }
+        const access = await checkAiAccess({ guild: interaction.guild, userId: interaction.user.id, member: interaction.member, cfg });
+        if (!access.ok) {
+          return interaction.reply({ content: access.notice || "❌ You can't use the AI in this server.", flags: 64 });
+        }
         aiPrompt = cfg.aiPersonality;
+        aiTokens = cfg.aiMaxTokens;
       }
 
       const question = interaction.options.getString("question");
       await interaction.deferReply();
 
-      const reply = await callGroq(interaction.user.id, question, aiPrompt);
+      const reply = await callGroq(interaction.user.id, question, aiPrompt, aiTokens);
       await interaction.editReply(reply.slice(0, 2000));
       await sendLog(client, `💬 /ask by ${interaction.user.tag}: ${question}`);
     }
@@ -590,7 +687,7 @@ client.on("interactionCreate", async interaction => {
           description:
             "**/ask** • Ask the AI\n**/donate** • Support\n**/level** • Check your level (Group Server)\n**/leaderboard** • See top users (Group Server)\n" +
             "**/setmodlog** • Set this server's mod-log channel (Manage Server)\n**/dashboard** • Get a code to link this server to the web dashboard (Manage Server)\n\n" +
-            "**Moderation:** /kick /ban /softban /unban /mute /unmute /warn /warnings /userlogs /clear",
+            "**Moderation:** /kick /ban /softban /unban /mute /unmute /warn /warnings /userlogs /clearlogs /editreason /clear",
           color: 0x5865f2
         }],
         flags: 64
@@ -720,7 +817,7 @@ client.on("interactionCreate", async interaction => {
       await sendModActionDM(client, interaction.guild, target.id, "Kicked from server", reason);
       await member.kick(reason);
 
-      await interaction.reply(`✅ Kicked ${target.tag} — ${reason}`);
+      await interaction.reply(`✅ Kicked ${target.tag} — ${reason}${await aidTag(interaction.guild.id)}`);
       await sendLog(client, `🔨 ${interaction.user.tag} kicked ${target.tag} — ${reason}`);
       await sendPublicModMessage(client, interaction.guild.id, "User Kicked", target, interaction.user, reason, { color: 0xFFA500 });
     }
@@ -737,7 +834,7 @@ client.on("interactionCreate", async interaction => {
       await sendModActionDM(client, interaction.guild, target.id, "Banned from server", reason);
       await interaction.guild.members.ban(target.id, { reason });
 
-      await interaction.reply({ content: `✅ Banned ${target.tag}`, flags: 64 });
+      await interaction.reply({ content: `✅ Banned ${target.tag}${await aidTag(interaction.guild.id)}`, flags: 64 });
       await sendLog(client, `🔨 ${interaction.user.tag} banned ${target.tag} — ${reason}`);
       await sendPublicModMessage(client, interaction.guild.id, "User Banned", target, interaction.user, reason, { color: 0xff0000 });
     }
@@ -801,7 +898,7 @@ client.on("interactionCreate", async interaction => {
         return;
       }
 
-      await interaction.editReply(`✅ Softbanned ${target.tag} — deleted ${days} day(s) of messages. They can rejoin.`);
+      await interaction.editReply(`✅ Softbanned ${target.tag} — deleted ${days} day(s) of messages. They can rejoin.${await aidTag(interaction.guild.id)}`);
       await sendLog(client, `🧹 ${interaction.user.tag} softbanned ${target.tag} (${days}d purge) — ${reason}`);
       await sendPublicModMessage(client, interaction.guild.id, "User Softbanned", target, interaction.user, reason, {
         color: 0xE67E22,
@@ -819,7 +916,7 @@ client.on("interactionCreate", async interaction => {
 
       try {
         await interaction.guild.members.unban(userId);
-        await interaction.reply(`✅ Unbanned user with ID ${userId}`);
+        await interaction.reply(`✅ Unbanned user with ID ${userId}${await aidTag(interaction.guild.id)}`);
         await sendLog(client, `♻️ ${interaction.user.tag} unbanned ${userId}`);
 
         await sendModActionDM(client, interaction.guild, userId, "Unbanned from server", "Unban");
@@ -850,7 +947,7 @@ client.on("interactionCreate", async interaction => {
       if (!member) return interaction.reply({ content: "Member not found.", flags: 64 });
 
       await member.timeout(minutes * 60 * 1000, `Muted by ${interaction.user.tag}`);
-      await interaction.reply(`🔇 ${target.tag} muted for ${minutes} minute(s).`);
+      await interaction.reply(`🔇 ${target.tag} muted for ${minutes} minute(s).${await aidTag(interaction.guild.id)}`);
 
       await sendModActionDM(client, interaction.guild, target.id, "Muted on server", "Timeout applied", `${minutes} minute(s)`);
       await sendPublicModMessage(
@@ -878,7 +975,7 @@ client.on("interactionCreate", async interaction => {
       }
 
       await member.timeout(null, `Unmuted by ${interaction.user.tag}`);
-      await interaction.reply(`🔊 ${target.tag} has been unmuted.`);
+      await interaction.reply(`🔊 ${target.tag} has been unmuted.${await aidTag(interaction.guild.id)}`);
       await sendLog(client, `🔊 ${interaction.user.tag} unmuted ${target.tag}`);
 
       await sendModActionDM(client, interaction.guild, target.id, "Unmuted from server", "Timeout removed");
@@ -907,10 +1004,11 @@ client.on("interactionCreate", async interaction => {
         userId: target.id,
         moderator: interaction.user.tag,
         reason,
+        caseId: await peekActionId(interaction.guild.id),
         time: new Date().toISOString()
       });
 
-      await interaction.reply(`⚠️ Warned ${target.tag}: ${reason}`);
+      await interaction.reply(`⚠️ Warned ${target.tag}: ${reason}${await aidTag(interaction.guild.id)}`);
       await sendLog(client, `⚠️ ${interaction.user.tag} warned ${target.tag}: ${reason}`);
 
       await sendModActionDM(client, interaction.guild, target.id, "Warning on server", reason);
@@ -920,7 +1018,7 @@ client.on("interactionCreate", async interaction => {
       const esc = await checkWarnEscalation(interaction.guild, target);
       if (esc) {
         if (esc.done) {
-          await interaction.followUp({ content: `🚨 ${target.tag} reached ${esc.total} warnings and was automatically ${esc.done}.` });
+          await interaction.followUp({ content: `🚨 ${target.tag} reached ${esc.total} warnings and was automatically ${esc.done}.${esc.caseId ? ` (Action ID **#${esc.caseId}**)` : ""}` });
         } else {
           await interaction.followUp({ content: `⚠️ ${target.tag} reached ${esc.total} warnings, but I couldn't apply the automatic ${esc.action} (check my role is above theirs and I have the permission).`, flags: 64 });
         }
@@ -936,7 +1034,7 @@ client.on("interactionCreate", async interaction => {
         return interaction.reply({ content: `${target.tag} has no warnings.`, flags: 64 });
       }
 
-      const lines = list.map((w, i) => `${i + 1}. ${w.reason} — by ${w.moderator} on ${w.time}`).join("\n");
+      const lines = list.map((w, i) => `${i + 1}. ${w.caseId ? `[#${w.caseId}] ` : ""}${w.reason} — by ${w.moderator} on ${w.time}`).join("\n");
       await interaction.reply({ content: `Warnings for ${target.tag}:\n${lines}`, flags: 64 });
     }
 
@@ -973,7 +1071,7 @@ client.on("interactionCreate", async interaction => {
             const unix = Math.floor(new Date(e.time).getTime() / 1000);
             const extra = e.duration ? ` • ${e.duration}` : "";
             const reason = String(e.reason || "No reason provided").slice(0, 120);
-            return `**${(page - 1) * PAGE_SIZE + i + 1}.** <t:${unix}:f> • **${e.action}**${extra}\n└ by ${e.moderatorTag} — ${reason}`;
+            return `**${(page - 1) * PAGE_SIZE + i + 1}.** ${e.caseId ? `\`#${e.caseId}\` ` : ""}<t:${unix}:f> • **${e.action}**${extra}\n└ by ${e.moderatorTag} — ${reason}${e.reasonEditedAt ? " ✏️" : ""}`;
           }).join("\n\n")
         : "No entries on this page.";
       if (description.length > 4000) description = description.slice(0, 3990) + "…";
@@ -998,6 +1096,149 @@ client.on("interactionCreate", async interaction => {
       };
 
       await interaction.reply({ embeds: [embed], flags: 64 });
+    }
+
+    // ===== NEW: clearlogs =====
+    if (cmd === "clearlogs") {
+      if (!interaction.memberPermissions.has(PermissionFlagsBits.ManageGuild)) {
+        return interaction.reply({ content: "❌ You need the Manage Server permission to delete logs.", flags: 64 });
+      }
+
+      const userId = interaction.options.getString("userid").trim();
+      if (!/^\d{15,25}$/.test(userId)) {
+        return interaction.reply({ content: "❌ That doesn't look like a valid user ID (numbers only).", flags: 64 });
+      }
+
+      const entryNum = interaction.options.getInteger("entry");
+      const guildId = interaction.guild.id;
+      const filter = { guildId, targetId: userId };
+
+      // ---- delete ONE entry (number shown in /userlogs, newest = 1) ----
+      if (entryNum) {
+        const [doc] = await modActionsCollection.find(filter).sort({ time: -1 }).skip(entryNum - 1).limit(1).toArray();
+        if (!doc) {
+          return interaction.reply({ content: `❌ There is no entry #${entryNum} for ID ${userId}. Check the numbers in /userlogs.`, flags: 64 });
+        }
+
+        await modActionsCollection.deleteOne({ _id: doc._id });
+
+        // If it was a /warn entry, remove the matching warning too so the warning count stays correct
+        let warnRemoved = false;
+        if (doc.action === "User Warned") {
+          const t = new Date(doc.time).getTime();
+          const w = await warningsCollection.findOne({
+            guildId,
+            userId,
+            time: { $gte: new Date(t - 10000).toISOString(), $lte: new Date(t + 10000).toISOString() }
+          });
+          if (w) {
+            await warningsCollection.deleteOne({ _id: w._id });
+            warnRemoved = true;
+          }
+        }
+
+        await interaction.reply({
+          content: `🗑 Deleted log #${entryNum} (**${doc.action}**) for ID \`${userId}\`.${warnRemoved ? " The matching warning was removed too." : ""}`,
+          flags: 64
+        });
+        await sendLog(client, `🗑 ${interaction.user.tag} deleted log #${entryNum} (${doc.action}) of ${userId} in ${interaction.guild.name}`);
+        return;
+      }
+
+      // ---- delete EVERYTHING for this user (needs confirmation) ----
+      const [logCount, warnCount] = await Promise.all([
+        modActionsCollection.countDocuments(filter),
+        warningsCollection.countDocuments({ guildId, userId })
+      ]);
+      if (logCount === 0 && warnCount === 0) {
+        return interaction.reply({ content: `✅ Nothing to delete — no records for ID \`${userId}\` in this server.`, flags: 64 });
+      }
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId("clearlogs_confirm").setLabel("Delete everything").setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId("clearlogs_cancel").setLabel("Cancel").setStyle(ButtonStyle.Secondary)
+      );
+
+      await interaction.reply({
+        content: `⚠️ This will permanently delete **${logCount}** log entries and **${warnCount}** warnings for ID \`${userId}\` in this server. This cannot be undone.`,
+        components: [row],
+        flags: 64
+      });
+      const prompt = await interaction.fetchReply();
+
+      try {
+        const click = await prompt.awaitMessageComponent({
+          componentType: ComponentType.Button,
+          filter: i => i.user.id === interaction.user.id,
+          time: 30000
+        });
+
+        if (click.customId === "clearlogs_confirm") {
+          const [r1, r2] = await Promise.all([
+            modActionsCollection.deleteMany(filter),
+            warningsCollection.deleteMany({ guildId, userId })
+          ]);
+          await click.update({
+            content: `🗑 Deleted **${r1.deletedCount}** log entries and **${r2.deletedCount}** warnings for ID \`${userId}\`.`,
+            components: []
+          });
+          await sendLog(client, `🗑 ${interaction.user.tag} deleted ALL logs (${r1.deletedCount} entries, ${r2.deletedCount} warnings) of ${userId} in ${interaction.guild.name}`);
+        } else {
+          await click.update({ content: "Cancelled. Nothing was deleted.", components: [] });
+        }
+      } catch {
+        await interaction.editReply({ content: "⏱ Timed out. Nothing was deleted.", components: [] }).catch(() => {});
+      }
+    }
+
+    // ===== NEW: editreason =====
+    if (cmd === "editreason") {
+      if (
+        !interaction.memberPermissions.has(PermissionFlagsBits.ModerateMembers) &&
+        !interaction.memberPermissions.has(PermissionFlagsBits.KickMembers)
+      ) {
+        return interaction.reply({ content: "❌ You need the Moderate Members permission to use this.", flags: 64 });
+      }
+
+      const caseId = interaction.options.getInteger("id");
+      const newReason = interaction.options.getString("reason").trim().slice(0, 500);
+      const guildId = interaction.guild.id;
+
+      const doc = await modActionsCollection.findOne({ guildId, caseId });
+      if (!doc) {
+        return interaction.reply({ content: `❌ No action with ID #${caseId} in this server.`, flags: 64 });
+      }
+
+      await modActionsCollection.updateOne(
+        { _id: doc._id },
+        {
+          $set: { reason: newReason, reasonEditedBy: interaction.user.tag, reasonEditedAt: new Date() },
+          $push: { reasonHistory: { reason: doc.reason, editedBy: interaction.user.tag, editedById: interaction.user.id, at: new Date() } }
+        }
+      );
+      // Keep the warning record in sync (the /warnings list and threshold use it)
+      await warningsCollection.updateMany({ guildId, caseId }, { $set: { reason: newReason } });
+
+      // Update the original mod-log embed too
+      let embedUpdated = false;
+      if (doc.logChannelId && doc.logMessageId) {
+        const ch = await client.channels.fetch(doc.logChannelId).catch(() => null);
+        const msg = ch ? await ch.messages.fetch(doc.logMessageId).catch(() => null) : null;
+        if (msg && msg.embeds[0]) {
+          const emb = msg.embeds[0].toJSON();
+          emb.fields = (emb.fields || []).filter(f => f.name !== "✏️ Reason edited");
+          const rf = emb.fields.find(f => f.name === "📝 Reason");
+          if (rf) rf.value = newReason.slice(0, 1024);
+          emb.fields.push({ name: "✏️ Reason edited", value: `by <@${interaction.user.id}> • <t:${Math.floor(Date.now() / 1000)}:R>` });
+          embedUpdated = await msg.edit({ embeds: [emb] }).then(() => true).catch(() => false);
+        }
+      }
+
+      await interaction.reply({
+        content: `✅ Reason of action **#${caseId}** (${doc.action} — ${doc.targetTag}) updated.\n**Old:** ${String(doc.reason).slice(0, 200)}\n**New:** ${newReason}${embedUpdated ? "\nThe mod-log embed was updated too." : ""}\n*The DM already sent to the member can't be changed.*`,
+        flags: 64
+      });
+      await sendLog(client, `✏️ ${interaction.user.tag} changed the reason of action #${caseId} in ${interaction.guild.name}`);
     }
 
     // clear messages
@@ -1028,7 +1269,7 @@ client.on("interactionCreate", async interaction => {
     } catch {}
     await sendLog(client, `⚠️ Command error: ${err.message}`);
   }
-});
+}
 
 // === Warning threshold auto-punishment (used by /warn AND auto-mod) ===
 async function checkWarnEscalation(guild, user) {
@@ -1053,10 +1294,11 @@ async function checkWarnEscalation(guild, user) {
       done = "banned";
     }
 
+    let caseId = null;
     if (done) {
-      await sendPublicModMessage(client, guild.id, `Auto-punish: ${cfg.warnAction}`, user, client.user, `Reached ${total} warnings`, { color: 0xff0000 });
+      caseId = await sendPublicModMessage(client, guild.id, `Auto-punish: ${cfg.warnAction}`, user, client.user, `Reached ${total} warnings`, { color: 0xff0000 });
     }
-    return { total, done, action: cfg.warnAction };
+    return { total, done, action: cfg.warnAction, caseId };
   } catch (err) {
     console.error("Warn auto-punish failed:", err);
     return { total, done: null, action: cfg.warnAction };
@@ -1113,8 +1355,6 @@ async function runAutomod(message, cfg) {
   const notice = await message.channel.send({ content: `${message.author}, ${reason}.`, allowedMentions: { users: [message.author.id] } }).catch(() => null);
   if (notice) setTimeout(() => notice.delete().catch(() => {}), 5000);
 
-  await sendPublicModMessage(client, message.guild.id, "Auto-mod: message removed", message.author, client.user, reason, { color: 0xE67E22 });
-
   // Optionally count this as a warning so the auto-punish threshold can kick in
   if (cfg.automodAddWarning) {
     await warningsCollection.insertOne({
@@ -1122,20 +1362,229 @@ async function runAutomod(message, cfg) {
       userId: message.author.id,
       moderator: client.user.tag,
       reason: `Auto-mod: ${reason}`,
+      caseId: await peekActionId(message.guild.id),
       time: new Date().toISOString()
     });
     await sendModActionDM(client, message.guild, message.author.id, "Warning on server", `Auto-mod: ${reason}`);
+  }
 
+  // Records the removal (and takes the pending ID the DM/warning above already showed)
+  await sendPublicModMessage(client, message.guild.id, "Auto-mod: message removed", message.author, client.user, reason, { color: 0xE67E22 });
+
+  if (cfg.automodAddWarning) {
     const esc = await checkWarnEscalation(message.guild, message.author);
     if (esc) {
       const msg = esc.done
-        ? `🚨 ${message.author} reached ${esc.total} warnings and was automatically ${esc.done}.`
+        ? `🚨 ${message.author} reached ${esc.total} warnings and was automatically ${esc.done}.${esc.caseId ? ` (Action ID **#${esc.caseId}**)` : ""}`
         : `⚠️ ${message.author} reached ${esc.total} warnings, but I couldn't apply the automatic ${esc.action} (check my role is above theirs and I have the permission).`;
       await message.channel.send({ content: msg, allowedMentions: { users: [message.author.id] } }).catch(() => null);
     }
   }
   return true;
 }
+
+// === Helpers for dashboard ID lists ===
+const idList = raw => new Set(String(raw || "").match(/\d{15,25}/g) || []);
+
+// === AI access control (blocked users, allow-list, per-member limit, daily server cap) ===
+const aiWindowUsage = new Map(); // "guildId:userId" -> [timestamps]
+
+async function checkAiAccess({ guild, userId, member, cfg }) {
+  // 1) Blocked users — nobody bypasses this, and they get no notice
+  if (idList(cfg.aiBlockedUsers).has(userId)) return { ok: false, notice: null };
+
+  // 2) Staff (Manage Server) skip the allow-list and all limits
+  if (member?.permissions?.has(PermissionFlagsBits.ManageGuild)) return { ok: true };
+
+  // 3) Allow-list (users and/or role)
+  const allowedUsers = idList(cfg.aiAllowedUsers);
+  if (allowedUsers.size > 0 || cfg.aiAllowedRoleId) {
+    const roleOk = cfg.aiAllowedRoleId && member?.roles?.cache?.has(cfg.aiAllowedRoleId);
+    if (!allowedUsers.has(userId) && !roleOk) {
+      return { ok: false, notice: "🔒 AI is limited to selected members in this server." };
+    }
+  }
+
+  // 4) Per-member limit (sliding window)
+  const key = `${guild.id}:${userId}`;
+  const now = Date.now();
+  let stamps = [];
+  if (cfg.aiMaxMessagesPerUser > 0) {
+    const windowMs = cfg.aiWindowMinutes * 60 * 1000;
+    stamps = (aiWindowUsage.get(key) || []).filter(t => now - t < windowMs);
+    if (stamps.length >= cfg.aiMaxMessagesPerUser) {
+      aiWindowUsage.set(key, stamps);
+      const mins = Math.max(1, Math.ceil((windowMs - (now - stamps[0])) / 60000));
+      return { ok: false, notice: `⏳ You've used your ${cfg.aiMaxMessagesPerUser} AI message(s) for now. Try again in about ${mins} minute(s).` };
+    }
+  }
+
+  // 5) Daily server-wide cap (stored in Mongo so it survives restarts)
+  const day = new Date().toISOString().slice(0, 10);
+  if (cfg.aiDailyServerCap > 0) {
+    const usage = await aiUsageCollection.findOne({ guildId: guild.id, day });
+    if ((usage?.count || 0) >= cfg.aiDailyServerCap) {
+      return { ok: false, notice: "📅 This server's daily AI limit has been reached. It resets at 00:00 UTC." };
+    }
+  }
+
+  // Allowed: record usage
+  if (cfg.aiMaxMessagesPerUser > 0) {
+    stamps.push(now);
+    aiWindowUsage.set(key, stamps);
+    if (aiWindowUsage.size > 5000) {
+      for (const [k, v] of aiWindowUsage) if (!v.length || now - v[v.length - 1] > 24 * 3600 * 1000) aiWindowUsage.delete(k);
+    }
+  }
+  if (cfg.aiDailyServerCap > 0) {
+    await aiUsageCollection.updateOne({ guildId: guild.id, day }, { $inc: { count: 1 } }, { upsert: true });
+  }
+  return { ok: true };
+}
+
+// === Message stream logging (with attachment forwarding) ===
+const MAX_FORWARD_BYTES = 10 * 1024 * 1024; // safe for every server boost level
+
+function getMsgLogChannel(guild, cfg, sourceChannelId) {
+  if (!cfg.msgLogEnabled || !cfg.msgLogChannelId) return null;
+  if (sourceChannelId === cfg.msgLogChannelId) return null; // never log the log channel (would loop)
+  if (idList(cfg.msgLogIgnoredChannels).has(sourceChannelId)) return null;
+  const ch = guild?.channels?.cache?.get(cfg.msgLogChannelId);
+  return ch && ch.isTextBased() ? ch : null;
+}
+
+async function logMessage(message, cfg) {
+  try {
+    if (message.author.bot && !cfg.msgLogBots) return;
+    const channel = getMsgLogChannel(message.guild, cfg, message.channel.id);
+    if (!channel) return;
+
+    const atts = [...message.attachments.values()];
+    const embed = {
+      color: 0x2B2D31,
+      author: { name: message.author.tag, icon_url: message.author.displayAvatarURL() },
+      description: message.content ? message.content.slice(0, 4000) : (atts.length ? "*(attachment only)*" : "*(no text)*"),
+      fields: [
+        { name: "Channel", value: `<#${message.channel.id}>`, inline: true },
+        { name: "Jump", value: `[Open message](${message.url})`, inline: true }
+      ],
+      footer: { text: `User ID: ${message.author.id} • Message ID: ${message.id}` },
+      timestamp: message.createdAt
+    };
+
+    const payload = { embeds: [embed], allowedMentions: { parse: [] } };
+    let uploadable = [];
+
+    if (atts.length) {
+      if (cfg.msgLogAttachments) {
+        uploadable = atts.filter(a => a.size <= MAX_FORWARD_BYTES).slice(0, 10);
+        const linkOnly = atts.filter(a => !uploadable.includes(a));
+        if (linkOnly.length) {
+          embed.fields.push({ name: "📎 Too large to forward (links)", value: linkOnly.map(a => `[${a.name}](${a.url})`).join("\n").slice(0, 1000) });
+        }
+        if (uploadable.length) payload.files = uploadable.map(a => ({ attachment: a.url, name: a.name }));
+      } else {
+        embed.fields.push({ name: "📎 Attachments", value: atts.map(a => a.name).join(", ").slice(0, 1000) });
+      }
+    }
+
+    try {
+      await channel.send(payload);
+    } catch (err) {
+      // Upload failed (size/permissions/network) — fall back to plain links so nothing is lost
+      if (!payload.files) throw err;
+      delete payload.files;
+      embed.fields.push({ name: "📎 Attachments (upload failed — links)", value: uploadable.map(a => `[${a.name}](${a.url})`).join("\n").slice(0, 1000) });
+      await channel.send(payload);
+    }
+  } catch (err) {
+    console.error("Message log failed:", err.message);
+  }
+}
+
+client.on("messageUpdate", async (oldMsg, newMsg) => {
+  try {
+    if (!newMsg.guildId) return;
+    const cfg = await getGuildConfig(newMsg.guildId);
+    if (!cfg.msgLogEnabled || !cfg.msgLogEdits) return;
+
+    if (newMsg.partial) newMsg = await newMsg.fetch().catch(() => null);
+    if (!newMsg || !newMsg.author) return;
+    if (newMsg.author.bot && !cfg.msgLogBots) return;
+    if (!oldMsg.partial && oldMsg.content === newMsg.content) return; // embed/link-preview update, not a real edit
+
+    const channel = getMsgLogChannel(newMsg.guild, cfg, newMsg.channelId);
+    if (!channel) return;
+
+    await channel.send({
+      embeds: [{
+        color: 0xF1C40F,
+        title: "✏️ Message edited",
+        author: { name: newMsg.author.tag, icon_url: newMsg.author.displayAvatarURL() },
+        fields: [
+          { name: "Before", value: oldMsg.partial ? "*(not cached)*" : (oldMsg.content || "*(empty)*").slice(0, 1000) },
+          { name: "After", value: (newMsg.content || "*(empty)*").slice(0, 1000) },
+          { name: "Channel", value: `<#${newMsg.channelId}>`, inline: true },
+          { name: "Jump", value: `[Open message](${newMsg.url})`, inline: true }
+        ],
+        footer: { text: `User ID: ${newMsg.author.id} • Message ID: ${newMsg.id}` },
+        timestamp: new Date()
+      }],
+      allowedMentions: { parse: [] }
+    });
+  } catch (err) {
+    console.error("messageUpdate log failed:", err.message);
+  }
+});
+
+client.on("messageDelete", async msg => {
+  try {
+    if (!msg.guildId) return;
+    const cfg = await getGuildConfig(msg.guildId);
+    if (!cfg.msgLogEnabled || !cfg.msgLogDeletes) return;
+    if (msg.author?.bot && !cfg.msgLogBots) return;
+
+    const guild = client.guilds.cache.get(msg.guildId);
+    const channel = getMsgLogChannel(guild, cfg, msg.channelId);
+    if (!channel) return;
+
+    const attNames = msg.attachments?.size ? [...msg.attachments.values()].map(a => a.name).join(", ") : null;
+    const fields = [
+      { name: "Author", value: msg.author ? `<@${msg.author.id}> (${msg.author.tag})` : "Unknown (message was not cached)", inline: true },
+      { name: "Channel", value: `<#${msg.channelId}>`, inline: true }
+    ];
+    if (attNames) fields.push({ name: "📎 Attachments", value: attNames.slice(0, 1000) });
+
+    await channel.send({
+      embeds: [{
+        color: 0xE74C3C,
+        title: "🗑 Message deleted",
+        description: msg.partial ? "*(content not cached)*" : (msg.content ? msg.content.slice(0, 4000) : "*(no text)*"),
+        fields,
+        footer: { text: msg.author ? `User ID: ${msg.author.id} • Message ID: ${msg.id}` : `Message ID: ${msg.id}` },
+        timestamp: new Date()
+      }],
+      allowedMentions: { parse: [] }
+    });
+  } catch (err) {
+    console.error("messageDelete log failed:", err.message);
+  }
+});
+
+client.on("messageDeleteBulk", async (messages, ch) => {
+  try {
+    if (!ch.guildId) return;
+    const cfg = await getGuildConfig(ch.guildId);
+    if (!cfg.msgLogEnabled || !cfg.msgLogDeletes) return;
+    const channel = getMsgLogChannel(ch.guild, cfg, ch.id);
+    if (!channel) return;
+    await channel.send({
+      embeds: [{ color: 0xE74C3C, title: "🧹 Bulk delete", description: `**${messages.size}** messages were deleted in <#${ch.id}>.`, timestamp: new Date() }]
+    });
+  } catch (err) {
+    console.error("messageDeleteBulk log failed:", err.message);
+  }
+});
 
 // === Message handler (automod + XP + AI) ===
 const xpCooldowns = new Map(); // "guildId:userId" -> last XP timestamp
@@ -1144,9 +1593,12 @@ client.on("messageCreate", async message => {
   try {
     const cfg = message.guild ? await getGuildConfig(message.guild.id) : null;
 
+    // ===== MESSAGE LOGGING (before auto-mod so removed messages + attachments are still captured) =====
+    if (cfg && cfg.msgLogEnabled) await logMessage(message, cfg);
+
     // ===== AUTO-MOD =====
     if (cfg && !message.author.bot) {
-      if (await runAutomod(message, cfg)) return;
+      if (await actionContext.run({ pending: null }, () => runAutomod(message, cfg))) return;
     }
 
     // ===== XP GAIN (per-server toggle, amount and cooldown from the dashboard) =====
@@ -1166,10 +1618,19 @@ client.on("messageCreate", async message => {
     if (!shouldReply(message, cfg)) return;
     if (cfg && !cfg.aiEnabled) return; // DMs have no cfg and are always allowed
 
+    // Per-server AI access rules + limits (blocked users, allow-list, per-member limit, daily cap)
+    if (cfg) {
+      const access = await checkAiAccess({ guild: message.guild, userId: message.author.id, member: message.member, cfg });
+      if (!access.ok) {
+        if (access.notice && cfg.aiLimitNotice) await message.reply(access.notice).catch(() => {});
+        return;
+      }
+    }
+
     const text = extractUserText(message);
 
     await message.channel.sendTyping();
-    const reply = await callGroq(message.author.id, text, cfg?.aiPersonality);
+    const reply = await callGroq(message.author.id, text, cfg?.aiPersonality, cfg?.aiMaxTokens);
     await sendLog(client, `💭 ${message.author.tag}: ${text}`);
 
     if (reply.length <= 2000) return message.reply(reply);

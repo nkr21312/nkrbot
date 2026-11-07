@@ -147,11 +147,33 @@ export const SETTINGS_SCHEMA = [
     ]
   },
   {
+    title: "📜 Message logging",
+    help: "Streams every message to a log channel. Attachments are re-uploaded so they survive even if the original is deleted. Tell your members that messages are logged. Busy servers can hit Discord's rate limits, so use an ignore-list for noisy channels.",
+    fields: [
+      { key: "msgLogEnabled", type: "bool", def: false, label: "Message logging enabled" },
+      { key: "msgLogChannelId", type: "channel", def: null, label: "Log channel", help: "Make this channel private (staff only)." },
+      { key: "msgLogAttachments", type: "bool", def: true, label: "Forward attachments (images, files) to the log channel", help: "Files over 10 MB are linked instead of uploaded." },
+      { key: "msgLogEdits", type: "bool", def: true, label: "Log edited messages" },
+      { key: "msgLogDeletes", type: "bool", def: true, label: "Log deleted messages" },
+      { key: "msgLogBots", type: "bool", def: false, label: "Also log messages from bots" },
+      { key: "msgLogIgnoredChannels", type: "textarea", def: "", maxLen: 500, label: "Ignored channel IDs", help: "Channels that should NOT be logged. Separate IDs with commas or new lines." }
+    ]
+  },
+  {
     title: "🤖 AI",
+    help: "Server staff (Manage Server permission) are never rate-limited or blocked by the allow-list. Limits reset if the bot restarts, except the daily server cap.",
     fields: [
       { key: "aiEnabled", type: "bool", def: true, label: "AI replies enabled (! prefix, mentions, /ask)" },
       { key: "aiChannelId", type: "channel", def: null, label: "Only reply in this channel", help: "Leave empty to allow AI in every channel. DMs always work." },
-      { key: "aiPersonality", type: "textarea", def: AI_DEFAULT, maxLen: 500, label: "AI personality / instructions" }
+      { key: "aiPersonality", type: "textarea", def: AI_DEFAULT, maxLen: 500, label: "AI personality / instructions" },
+      { key: "aiBlockedUsers", type: "textarea", def: "", maxLen: 1000, label: "Blocked users (cannot use AI)", help: "User IDs, separated by commas or new lines. Tip: Discord settings → Advanced → Developer Mode, then right-click a user → Copy User ID." },
+      { key: "aiAllowedUsers", type: "textarea", def: "", maxLen: 1000, label: "Allowed users only (optional)", help: "If this list OR the role below is filled in, ONLY those people can use AI. Leave both empty to allow everyone." },
+      { key: "aiAllowedRoleId", type: "role", def: null, label: "Allowed role only (optional)" },
+      { key: "aiMaxMessagesPerUser", type: "int", min: 0, max: 1000, def: 0, label: "Max AI messages per member (0 = unlimited)" },
+      { key: "aiWindowMinutes", type: "int", min: 1, max: 1440, def: 60, label: "…per this many minutes", help: "Example: 5 messages per 60 minutes." },
+      { key: "aiDailyServerCap", type: "int", min: 0, max: 100000, def: 0, label: "Max AI responses per day for the whole server (0 = unlimited)", help: "Resets at 00:00 UTC." },
+      { key: "aiMaxTokens", type: "int", min: 50, max: 2000, def: 500, label: "Max length of each AI response (tokens)", help: "About 4 characters per token. Lower = shorter, cheaper answers." },
+      { key: "aiLimitNotice", type: "bool", def: true, label: "Tell members when they hit a limit", help: "If off, the bot just stays silent. Blocked users never get a notice." }
     ]
   },
   {
@@ -170,7 +192,7 @@ export const SETTINGS_DEFAULTS = Object.fromEntries(
 );
 
 // Validates form input against the schema — never trusts the browser.
-export function sanitizeSettings(body, guild) {
+export function sanitizeSettings(body, guild, commandNames = []) {
   const out = {};
   for (const f of SETTINGS_SCHEMA.flatMap(s => s.fields)) {
     const raw = body[f.key];
@@ -202,7 +224,41 @@ export function sanitizeSettings(body, guild) {
       }
     }
   }
+  // ---- slash-command rules (only names the bot really has are accepted) ----
+  const toArr = v => (v === undefined ? [] : Array.isArray(v) ? v : [v]);
+  const rules = {};
+  for (const name of commandNames) {
+    if (name === "dashboard") continue; // never lock people out of the link command
+    const enabled = body[`cmd_${name}_on`] === "1";
+    const channels = [...new Set(toArr(body[`cmd_${name}_ch`]).map(String))].filter(id => {
+      const ch = guild.channels.cache.get(id);
+      return ch && ch.type === ChannelType.GuildText;
+    });
+    if (!enabled || channels.length) rules[name] = { enabled, channels };
+  }
+  out.commandRules = rules;
+
   return out;
+}
+
+export function renderCommandCard(names, cfg, guild) {
+  const rules = cfg.commandRules || {};
+  const chans = guild.channels.cache
+    .filter(c => c.type === ChannelType.GuildText)
+    .sort((a, b) => a.rawPosition - b.rawPosition);
+  const rows = names
+    .filter(n => n !== "dashboard")
+    .map(name => {
+      const r = rules[name] || {};
+      const on = r.enabled !== false;
+      const sel = new Set(r.channels || []);
+      const opts = chans.map(c => `<option value="${esc(c.id)}"${sel.has(c.id) ? " selected" : ""}>#${esc(c.name)}</option>`).join("");
+      return `<tr><td><b>/${esc(name)}</b></td><td><input type="checkbox" name="cmd_${esc(name)}_on" value="1"${on ? " checked" : ""} aria-label="Enable /${esc(name)}"></td><td><select multiple size="3" name="cmd_${esc(name)}_ch" aria-label="Allowed channels for /${esc(name)}">${opts}</select></td></tr>`;
+    })
+    .join("");
+  return `<div class="card"><h2>⌨️ Slash commands</h2>
+<p class="muted">Turn commands on/off and limit WHERE they work. Pick no channels = works everywhere. Hold Ctrl (or Cmd) to select several. Discord can't hide a command from the command list per channel, so the bot refuses it with a message instead. /dashboard is always allowed so you can't lock yourself out.</p>
+<table><tr><th>Command</th><th>Enabled</th><th>Allowed channels</th></tr>${rows}</table></div>`;
 }
 
 export function renderField(f, cfg, guild) {
@@ -245,7 +301,7 @@ const csrfInput = csrf => `<input type="hidden" name="_csrf" value="${esc(csrf)}
 // Router factory
 // ============================================================
 
-export function createDashboard({ client, db, mongoClient, getGuildConfig, setGuildConfig }) {
+export function createDashboard({ client, db, mongoClient, getGuildConfig, setGuildConfig, getCommandNames }) {
   if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
     throw new Error("SESSION_SECRET must be set and at least 32 characters long.");
   }
@@ -279,7 +335,7 @@ export function createDashboard({ client, db, mongoClient, getGuildConfig, setGu
       }
     })
   );
-  router.use(express.urlencoded({ extended: false, limit: "40kb" }));
+  router.use(express.urlencoded({ extended: false, limit: "300kb", parameterLimit: 20000 }));
 
   router.use(
     session({
@@ -488,28 +544,28 @@ export function createDashboard({ client, db, mongoClient, getGuildConfig, setGu
 
     const sections = SETTINGS_SCHEMA.map(sec =>
       `<div class="card"><h2>${esc(sec.title)}</h2>${sec.help ? `<p class="muted">${esc(sec.help)}</p>` : ""}${sec.fields.map(f => renderField(f, cfg, guild)).join("")}</div>`
-    ).join("");
+    ).join("") + renderCommandCard(getCommandNames(), cfg, guild);
 
     const [actions, warnCount] = await Promise.all([
       modActions.find({ guildId: guild.id }).sort({ time: -1 }).limit(15).toArray(),
       warnings.countDocuments({ guildId: guild.id })
     ]);
     const rows = actions.length
-      ? actions.map(a => `<tr><td>${esc(a.action)}</td><td>${esc(a.targetTag)}</td><td>${esc(a.moderatorTag)}</td><td>${esc((a.reason || "").slice(0, 80))}</td><td class="muted">${esc(new Date(a.time).toISOString().replace("T", " ").slice(0, 16))}</td></tr>`).join("")
-      : `<tr><td colspan="5" class="muted">No actions recorded yet.</td></tr>`;
+      ? actions.map(a => `<tr><td class="muted">${a.caseId ? "#" + esc(a.caseId) : "—"}</td><td>${esc(a.action)}</td><td>${esc(a.targetTag)}</td><td>${esc(a.moderatorTag)}</td><td>${esc((a.reason || "").slice(0, 80))}</td><td class="muted">${esc(new Date(a.time).toISOString().replace("T", " ").slice(0, 16))}</td></tr>`).join("")
+      : `<tr><td colspan="6" class="muted">No actions recorded yet.</td></tr>`;
 
     const flash = req.query.saved ? { type: "ok", msg: "Settings saved." } : null;
 
     render(req, res, guild.name, `
 <div class="card"><h2>${esc(guild.name)}</h2><p class="muted">${guild.memberCount} members · ${warnCount} warnings stored</p></div>
 <form method="post" action="/dashboard/guild/${esc(guild.id)}/settings">${csrfInput(req.session.csrf)}${sections}<button class="save" type="submit">Save all settings</button></form>
-<div class="card" style="margin-top:18px"><h2>Recent mod actions</h2><table><tr><th>Action</th><th>User</th><th>Moderator</th><th>Reason</th><th>When (UTC)</th></tr>${rows}</table></div>
+<div class="card" style="margin-top:18px"><h2>Recent mod actions</h2><table><tr><th>ID</th><th>Action</th><th>User</th><th>Moderator</th><th>Reason</th><th>When (UTC)</th></tr>${rows}</table></div>
 <div class="card"><h2>Unlink</h2><p class="muted">Removes this server from your web account. Run /dashboard in Discord to link again.</p>
 <form method="post" action="/dashboard/guild/${esc(guild.id)}/unlink">${csrfInput(req.session.csrf)}<button class="danger" type="submit">Unlink server</button></form></div>`, flash);
   });
 
   router.post("/guild/:id/settings", requireAuth, requireGuild, verifyCsrf, async (req, res) => {
-    await setGuildConfig(req.guild.id, sanitizeSettings(req.body, req.guild));
+    await setGuildConfig(req.guild.id, sanitizeSettings(req.body, req.guild, getCommandNames()));
     res.redirect(`/dashboard/guild/${req.guild.id}?saved=1`);
   });
 
