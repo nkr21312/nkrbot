@@ -251,17 +251,17 @@ async function sendModActionDM(client, guild, userId, action, reason, duration =
 
     const embed = {
       color: 0x5865f2,
-      title: `📋 ${action}`,
+      title: `${action}`,
       fields: [
-        { name: "🏠 Server", value: guildName, inline: true },
-        { name: "📝 Reason", value: reason || "No reason provided", inline: true }
+        { name: "Server", value: guildName, inline: true },
+        { name: "Reason", value: reason || "No reason provided", inline: true }
       ],
       footer: { text: `User ID: ${userId}${caseId ? ` • Action ID #${caseId}` : ""}` },
       timestamp: new Date()
     };
 
     if (duration) {
-      embed.fields.push({ name: "⏱ Duration", value: duration, inline: true });
+      embed.fields.push({ name: "Duration", value: duration, inline: true });
     }
 
     await user.send({ embeds: [embed] });
@@ -301,18 +301,18 @@ async function sendPublicModMessage(client, guildId, action, target, moderator, 
 
     const embed = {
       color: extra.color || 0xff0000,
-      title: `🚨 ${action}`,
+      title: `${action}`,
       fields: [
-        { name: "👤 User", value: `<@${target.id}> (${target.tag})`, inline: true },
-        { name: "🛡 Moderator", value: `<@${moderator.id}>`, inline: true },
-        { name: "📝 Reason", value: reason || "No reason provided" }
+        { name: "User", value: `<@${target.id}> (${target.tag})`, inline: true },
+        { name: "Moderator", value: `<@${moderator.id}>`, inline: true },
+        { name: "Reason", value: reason || "No reason provided" }
       ],
       footer: { text: `User ID: ${target.id} • Action ID #${caseId}` },
       timestamp: new Date()
     };
 
     if (extra.duration) {
-      embed.fields.push({ name: "⏱ Duration", value: extra.duration });
+      embed.fields.push({ name: "Duration", value: extra.duration });
     }
 
     const sent = await channel.send({ embeds: [embed] });
@@ -341,7 +341,7 @@ async function sendLevelUpMessage(client, userId, newLevel, totalXP, guildId) {
 
       const levelUpEmbed = {
         color: 0xFFD700,
-        title: "🎉 Level Up!",
+        title: "Level Up!",
         description: `<@${userId}> reached **Level ${newLevel}**!`,
         thumbnail: user ? { url: user.displayAvatarURL() } : undefined,
         fields: [
@@ -758,15 +758,15 @@ async function handleInteraction(interaction) {
 
       const embed = {
         color: 0x5865f2,
-        title: `📊 ${user.username}'s Level Info`,
+        title: `${user.username}'s Level Info`,
         footer: { text: `User ID: ${user.id}` },
         thumbnail: { url: user.displayAvatarURL() },
         fields: [
-          { name: "🎖️ Level", value: `${levelInfo.level}`, inline: true },
-          { name: "⭐ Total XP", value: `${levelInfo.totalXP}`, inline: true },
-          { name: "📈 Progress", value: `${progressBar} ${progressPercent}%`, inline: false },
-          { name: "🎯 XP in Level", value: `${levelInfo.xpInCurrentLevel}/${levelInfo.xpNeededForThisLevel}`, inline: true },
-          { name: "📍 XP to Next Level", value: `${levelInfo.xpNeededForThisLevel - levelInfo.xpInCurrentLevel}`, inline: true }
+          { name: "Level", value: `${levelInfo.level}`, inline: true },
+          { name: "Total XP", value: `${levelInfo.totalXP}`, inline: true },
+          { name: "Progress", value: `${progressBar} ${progressPercent}%`, inline: false },
+          { name: "XP in Level", value: `${levelInfo.xpInCurrentLevel}/${levelInfo.xpNeededForThisLevel}`, inline: true },
+          { name: "XP to Next Level", value: `${levelInfo.xpNeededForThisLevel - levelInfo.xpInCurrentLevel}`, inline: true }
         ]
       };
 
@@ -785,13 +785,13 @@ async function handleInteraction(interaction) {
 
       let description = "";
       for (let i = 0; i < users.length; i++) {
-        const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `#${i + 1}`;
+        const medal = `#${i + 1}`;
         description += `${medal} <@${users[i].userId}> - Level **${users[i].level}** (${users[i].totalXP} XP)\n`;
       }
 
       const embed = {
         color: 0xFFD700,
-        title: "🏆 Leaderboard",
+        title: "Leaderboard",
         description,
         footer: { text: "Top 10 Most Active Users" }
       };
@@ -1071,7 +1071,7 @@ async function handleInteraction(interaction) {
             const unix = Math.floor(new Date(e.time).getTime() / 1000);
             const extra = e.duration ? ` • ${e.duration}` : "";
             const reason = String(e.reason || "No reason provided").slice(0, 120);
-            return `**${(page - 1) * PAGE_SIZE + i + 1}.** ${e.caseId ? `\`#${e.caseId}\` ` : ""}<t:${unix}:f> • **${e.action}**${extra}\n└ by ${e.moderatorTag} — ${reason}${e.reasonEditedAt ? " ✏️" : ""}`;
+            return `**${(page - 1) * PAGE_SIZE + i + 1}.** ${e.caseId ? `\`#${e.caseId}\` ` : ""}<t:${unix}:f> • **${e.action}**${extra}\n└ by ${e.moderatorTag} — ${reason}${e.reasonEditedAt ? " (edited)" : ""}`;
           }).join("\n\n")
         : "No entries on this page.";
       if (description.length > 4000) description = description.slice(0, 3990) + "…";
@@ -1082,14 +1082,14 @@ async function handleInteraction(interaction) {
 
       const embed = {
         color: 0x5865f2,
-        title: `📁 Mod logs — ${user.tag}`,
+        title: `Mod logs — ${user.tag}`,
         thumbnail: { url: user.displayAvatarURL() },
         description,
         fields: [
-          { name: "📊 Summary", value: summary },
-          { name: "⚠️ Warnings on record", value: String(warnCount), inline: true },
-          { name: "📌 Total actions", value: String(total), inline: true },
-          { name: "👥 In server", value: member ? "Yes" : "No", inline: true }
+          { name: "Summary", value: summary },
+          { name: "Warnings on record", value: String(warnCount), inline: true },
+          { name: "Total actions", value: String(total), inline: true },
+          { name: "In server", value: member ? "Yes" : "No", inline: true }
         ],
         footer: { text: `User ID: ${user.id} • Page ${Math.min(page, pages)}/${pages}` },
         timestamp: new Date()
@@ -1226,10 +1226,10 @@ async function handleInteraction(interaction) {
         const msg = ch ? await ch.messages.fetch(doc.logMessageId).catch(() => null) : null;
         if (msg && msg.embeds[0]) {
           const emb = msg.embeds[0].toJSON();
-          emb.fields = (emb.fields || []).filter(f => f.name !== "✏️ Reason edited");
-          const rf = emb.fields.find(f => f.name === "📝 Reason");
+          emb.fields = (emb.fields || []).filter(f => f.name !== "Reason edited" && f.name !== "✏️ Reason edited");
+          const rf = emb.fields.find(f => f.name === "Reason" || f.name === "📝 Reason");
           if (rf) rf.value = newReason.slice(0, 1024);
-          emb.fields.push({ name: "✏️ Reason edited", value: `by <@${interaction.user.id}> • <t:${Math.floor(Date.now() / 1000)}:R>` });
+          emb.fields.push({ name: "Reason edited", value: `by <@${interaction.user.id}> • <t:${Math.floor(Date.now() / 1000)}:R>` });
           embedUpdated = await msg.edit({ embeds: [emb] }).then(() => true).catch(() => false);
         }
       }
@@ -1480,11 +1480,11 @@ async function logMessage(message, cfg) {
         uploadable = atts.filter(a => a.size <= MAX_FORWARD_BYTES).slice(0, 10);
         const linkOnly = atts.filter(a => !uploadable.includes(a));
         if (linkOnly.length) {
-          embed.fields.push({ name: "📎 Too large to forward (links)", value: linkOnly.map(a => `[${a.name}](${a.url})`).join("\n").slice(0, 1000) });
+          embed.fields.push({ name: "Too large to forward (links)", value: linkOnly.map(a => `[${a.name}](${a.url})`).join("\n").slice(0, 1000) });
         }
         if (uploadable.length) payload.files = uploadable.map(a => ({ attachment: a.url, name: a.name }));
       } else {
-        embed.fields.push({ name: "📎 Attachments", value: atts.map(a => a.name).join(", ").slice(0, 1000) });
+        embed.fields.push({ name: "Attachments", value: atts.map(a => a.name).join(", ").slice(0, 1000) });
       }
     }
 
@@ -1494,7 +1494,7 @@ async function logMessage(message, cfg) {
       // Upload failed (size/permissions/network) — fall back to plain links so nothing is lost
       if (!payload.files) throw err;
       delete payload.files;
-      embed.fields.push({ name: "📎 Attachments (upload failed — links)", value: uploadable.map(a => `[${a.name}](${a.url})`).join("\n").slice(0, 1000) });
+      embed.fields.push({ name: "Attachments (upload failed — links)", value: uploadable.map(a => `[${a.name}](${a.url})`).join("\n").slice(0, 1000) });
       await channel.send(payload);
     }
   } catch (err) {
@@ -1519,7 +1519,7 @@ client.on("messageUpdate", async (oldMsg, newMsg) => {
     await channel.send({
       embeds: [{
         color: 0xF1C40F,
-        title: "✏️ Message edited",
+        title: "Message edited",
         author: { name: newMsg.author.tag, icon_url: newMsg.author.displayAvatarURL() },
         fields: [
           { name: "Before", value: oldMsg.partial ? "*(not cached)*" : (oldMsg.content || "*(empty)*").slice(0, 1000) },
@@ -1553,12 +1553,12 @@ client.on("messageDelete", async msg => {
       { name: "Author", value: msg.author ? `<@${msg.author.id}> (${msg.author.tag})` : "Unknown (message was not cached)", inline: true },
       { name: "Channel", value: `<#${msg.channelId}>`, inline: true }
     ];
-    if (attNames) fields.push({ name: "📎 Attachments", value: attNames.slice(0, 1000) });
+    if (attNames) fields.push({ name: "Attachments", value: attNames.slice(0, 1000) });
 
     await channel.send({
       embeds: [{
         color: 0xE74C3C,
-        title: "🗑 Message deleted",
+        title: "Message deleted",
         description: msg.partial ? "*(content not cached)*" : (msg.content ? msg.content.slice(0, 4000) : "*(no text)*"),
         fields,
         footer: { text: msg.author ? `User ID: ${msg.author.id} • Message ID: ${msg.id}` : `Message ID: ${msg.id}` },
@@ -1579,7 +1579,7 @@ client.on("messageDeleteBulk", async (messages, ch) => {
     const channel = getMsgLogChannel(ch.guild, cfg, ch.id);
     if (!channel) return;
     await channel.send({
-      embeds: [{ color: 0xE74C3C, title: "🧹 Bulk delete", description: `**${messages.size}** messages were deleted in <#${ch.id}>.`, timestamp: new Date() }]
+      embeds: [{ color: 0xE74C3C, title: "Bulk delete", description: `**${messages.size}** messages were deleted in <#${ch.id}>.`, timestamp: new Date() }]
     });
   } catch (err) {
     console.error("messageDeleteBulk log failed:", err.message);
